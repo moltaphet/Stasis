@@ -1,0 +1,93 @@
+"""Fixtures for Stasis Protocol integration tests (full consensus, real network).
+
+Runs against a live GenLayer network - GLSim on localnet by default:
+
+    glsim --port 4000 --validators 5 --no-browser
+    NO_PROXY=127.0.0.1,localhost gltest tests/integration/ -v -s --network localnet
+
+Unlike direct mode, every write goes through real leader + validator consensus.
+
+GLSim serves a stub contract-schema endpoint, so instead of gltest's schema-bound
+Contract wrapper we drive the deployed contract through the genlayer_py client by
+function name (exactly how the CLI does). Web and LLM calls are real (not mocked),
+so adjudication tests that need a working LLM verdict are skipped unless
+STASIS_INTEGRATION_LLM=1.
+"""
+
+import os
+
+import pytest
+
+from gltest import get_contract_factory
+from gltest.clients import get_gl_client
+from gltest.accounts import get_default_account
+from gltest.types import TransactionStatus
+
+# Enum mirrors (u32 values from contracts/stasis_guardian.py).
+TIER_NORMAL = 0
+TIER_ELEVATED_RISK = 1
+TIER_CRITICAL_BREACH = 2
+TIER_MALICIOUS_REPORT = 3
+
+STATE_ARMED = 0
+STATE_TRIPPED = 1
+STATE_RESTORED = 2
+STATE_RATE_LIMITED = 3
+
+PRIMARY_FEED = "https://feed-a.example.com/vault/telemetry"
+SECONDARY_FEED = "https://feed-b.example.com/vault/telemetry"
+
+LLM_AVAILABLE = os.environ.get("STASIS_INTEGRATION_LLM") == "1"
+requires_llm = pytest.mark.skipif(
+    not LLM_AVAILABLE,
+    reason="set STASIS_INTEGRATION_LLM=1 with an LLM provider configured to run adjudication tests",
+)
+
+
+def synthetic_target(index: int) -> str:
+    """A distinct, non-zero 20-byte address to use as a target vault per test."""
+    return "0x" + f"{index + 1:040x}"
+
+
+class GuardianClient:
+    """Thin schema-free wrapper over a deployed guardian, driven by function name."""
+
+    def __init__(self, address, client, account):
+        self.address = address
+        self.client = client
+        self.account = account
+
+    def read(self, fn, args=None):
+        return self.client.read_contract(
+            address=self.address, function_name=fn, args=args or []
+        )
+
+    def write(self, fn, args=None, value=0):
+        tx_hash = self.client.write_contract(
+            address=self.address,
+            function_name=fn,
+            account=self.account,
+            args=args or [],
+            value=value,
+        )
+        return self.client.wait_for_transaction_receipt(
+            transaction_hash=tx_hash, status=TransactionStatus.ACCEPTED
+        )
+
+    def write_expect_fail(self, fn, args=None, value=0) -> bool:
+        """True if the transaction reverts - either by raising or a failed receipt."""
+        from gltest.assertions import tx_execution_failed
+
+        try:
+            receipt = self.write(fn, args=args, value=value)
+        except Exception:
+            return True
+        return tx_execution_failed(receipt)
+
+
+@pytest.fixture(scope="module")
+def gc():
+    """Deploy the guardian once per module and wrap it for schema-free calls."""
+    factory = get_contract_factory(contract_file_path="stasis_guardian.py")
+    contract = factory.deploy(args=[])
+    return GuardianClient(contract.address, get_gl_client(), get_default_account())

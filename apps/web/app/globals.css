@@ -1,0 +1,142 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  background-color: #07090e;
+  color: #e5e9f0;
+}
+
+/* Immersive ambient background: layered radial glows over deep obsidian. */
+body {
+  background-image:
+    radial-gradient(900px 500px at 15% -8%, rgba(0, 229, 255, 0.08), transparent 60%),
+    radial-gradient(1000px 600px at 92% 0%, rgba(0, 255, 163, 0.07), transparent 55%),
+    radial-gradient(1200px 800px at 50% 120%, rgba(255, 46, 84, 0.06), transparent 60%),
+    linear-gradient(180deg, #07090e 0%, #0b0f17 100%);
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Numbers, feeds, hashes, escrows: rock-solid tabular figures. */
+.tnum {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+/* Condensed operational label. */
+.label {
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  font-weight: 600;
+  font-size: 10px;
+  line-height: 1;
+}
+
+/* Glassmorphic surface. */
+.glass {
+  background: rgba(15, 20, 31, 0.7);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* Fine hairline grid texture used behind hero elements. */
+.grid-texture {
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+/* CRT scanline overlay for the terminal container. */
+.crt {
+  position: relative;
+}
+.crt::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.03) 0px,
+    rgba(255, 255, 255, 0.03) 1px,
+    transparent 2px,
+    transparent 3px
+  );
+  z-index: 2;
+}
+.crt::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 40%;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    transparent,
+    rgba(0, 255, 163, 0.05),
+    transparent
+  );
+  animation: scanline 6s linear infinite;
+  z-index: 2;
+}
+
+.blink::after {
+  content: "\2588";
+  margin-left: 1px;
+  animation: caret 1s steps(1) infinite;
+}
+@keyframes caret {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* Custom slim scrollbar for terminal logs. */
+.thin-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.thin-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 3px;
+}
+
+/* Radix accordion open/close animation. */
+@keyframes acc-down {
+  from {
+    height: 0;
+  }
+  to {
+    height: var(--radix-accordion-content-height);
+  }
+}
+@keyframes acc-up {
+  from {
+    height: var(--radix-accordion-content-height);
+  }
+  to {
+    height: 0;
+  }
+}
+.acc-content[data-state="open"] {
+  animation: acc-down 220ms ease-out;
+}
+.acc-content[data-state="closed"] {
+  animation: acc-up 180ms ease-in;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .crt::after,
+  .blink::after {
+    animation: none;
+  }
+}

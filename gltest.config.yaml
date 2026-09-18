@@ -1,0 +1,9 @@
+# gltest configuration for Stasis Protocol integration tests.
+# Only paths are overridden; network definitions use gltest's built-in defaults
+# (localnet, studionet, testnet_asimov, testnet_bradbury), selected with --network.
+#
+#   Local Studio (real GenVM, recommended):  genlayer up  ->  --network localnet
+#   Hosted StudioNet (gasless):              --network studionet
+paths:
+  contracts: contracts/
+  artifacts: artifacts/
