@@ -1,9 +1,10 @@
-# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
+# { "Depends": "py-genlayer:5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng" }
+
 # Stasis Guardian: an autonomous emergency circuit breaker for DeFi vaults.
 #
 # It registers EVM DeFi vaults, funds a native GEN bounty escrow, ingests
 # incident telemetry from multiple independent feeds, classifies it via
-# multi-validator equivalence consensus inside gl.vm.run_nondet_unsafe, and on a
+# multi-validator equivalence consensus inside gl.vm.run_nondet, and on a
 # confirmed CRITICAL_BREACH verdict trips the circuit breaker: it pauses the
 # target EVM vault on finalization and credits a pull-over-push bounty to the
 # reporter.
@@ -23,10 +24,17 @@
 # TreeMap, DynArray, Address, u256, u32; every storage struct is
 # @allow_storage @dataclass; no storage access inside non-deterministic closures.
 
-from genlayer import *
+import genlayer as gl
+from genlayer.storage import TreeMap, DynArray
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+
+# Aliases for GenLayer v0.3 storage and primitive types
+allow_storage = gl.storage.allow
+Address = gl.Address
+u256 = gl.u256
+u32 = gl.u32
 
 # --- Discrete anomaly tiers (stored as u32) -----------------------------------
 
@@ -44,6 +52,20 @@ STATE_RATE_LIMITED = u32(3)  # elevated risk, partial throttle, still monitoring
 
 # The zero address; registration rejects it.
 ZERO_ADDRESS = Address(bytes(20))
+
+
+def _as_address(value) -> Address:
+    # Normalize an address argument at the calldata boundary.
+    #
+    # Under GenVM v0.6 an `Address`-annotated parameter is only decoded into an
+    # Address when the caller tags the calldata as an address; an untagged call -
+    # the Studio write UI, a schema-free client, a raw RPC call - arrives as a
+    # plain str. The storage descriptors require the real wrapper (AddrDesc.set
+    # calls .as_bytes), so an un-normalized str raises AttributeError on write and
+    # silently misses on lookup, since a str key never equals an Address key. Every
+    # public method that takes an address therefore normalizes it on entry.
+    return value if isinstance(value, Address) else Address(value)
+
 
 # Upper bound for a u256 value. Externally sourced magnitudes are clamped to this
 # range so deterministic settlement can never panic on an out-of-range u256().
@@ -306,16 +328,14 @@ def _map_tier(
 # --- Contract -----------------------------------------------------------------
 
 
-class StasisGuardian(gl.Contract):
+class StasisGuardian(gl.contract.Contract):
     vaults: TreeMap[Address, Vault]
     processed_incidents: TreeMap[u256, bool]
     claimable_balances: TreeMap[Address, u256]
     total_deposited: u256
     locked_escrow: u256
-    owner: Address
 
     def __init__(self) -> None:
-        self.owner = gl.message.sender_address
         self.total_deposited = u256(0)
         self.locked_escrow = u256(0)
 
@@ -332,6 +352,7 @@ class StasisGuardian(gl.Contract):
         cooldown_seconds: u256,
         active: bool,
     ) -> None:
+        target_address = _as_address(target_address)
         if target_address == ZERO_ADDRESS:
             raise gl.vm.UserError(ERROR_EXPECTED + " target address must be non-zero")
         if target_address in self.vaults:
@@ -362,6 +383,7 @@ class StasisGuardian(gl.Contract):
         cooldown_seconds: u256,
         active: bool,
     ) -> None:
+        target_address = _as_address(target_address)
         vault = self._require_vault(target_address)
         if gl.message.sender_address != vault.admin:
             raise gl.vm.UserError(ERROR_EXPECTED + " only the vault admin may configure it")
@@ -376,6 +398,7 @@ class StasisGuardian(gl.Contract):
     def deposit(self, target_address: Address) -> None:
         # Fund a vault's native GEN bounty reserve. Value flows into unlocked
         # available escrow (available == total_deposited - locked_escrow).
+        target_address = _as_address(target_address)
         vault = self._require_vault(target_address)
         value = gl.message.value
         if value == u256(0):
@@ -407,6 +430,7 @@ class StasisGuardian(gl.Contract):
 
     @gl.public.write
     def recover(self, target_address: Address) -> None:
+        target_address = _as_address(target_address)
         vault = self._require_vault(target_address)
         if gl.message.sender_address != vault.admin:
             raise gl.vm.UserError(ERROR_EXPECTED + " only the vault admin may recover it")
@@ -430,6 +454,7 @@ class StasisGuardian(gl.Contract):
         # reporter must attach at least this much native GEN to submit_signal, so a
         # spammer of fabricated panic reports is put at economic risk (the bond is
         # slashed on a MALICIOUS_REPORT verdict).
+        target_address = _as_address(target_address)
         vault = self._require_vault(target_address)
         if gl.message.sender_address != vault.admin:
             raise gl.vm.UserError(ERROR_EXPECTED + " only the vault admin may set min bond")
@@ -446,6 +471,7 @@ class StasisGuardian(gl.Contract):
         # Live path: fetches dual ground-truth feeds. Optional reporter bond may be
         # attached as native value; it is refunded on a valid report and slashed on
         # a MALICIOUS_REPORT verdict.
+        target_address = _as_address(target_address)
         bond = int(gl.message.value)
         # Enforce the anti-griefing bond floor when the vault sets one. The check is
         # deterministic and runs before any accounting, so an under-bonded report
@@ -469,6 +495,7 @@ class StasisGuardian(gl.Contract):
     ) -> u32:
         # Judge demo hook: drives the identical adjudication path with injected feed
         # bodies (no live web fetch, no bond).
+        target_address = _as_address(target_address)
         if mock_primary == "" and mock_secondary == "":
             raise gl.vm.UserError(ERROR_EXPECTED + " at least one mock feed must be non-empty")
         return self._run_cycle(
@@ -527,6 +554,7 @@ class StasisGuardian(gl.Contract):
 
     @gl.public.view
     def is_registered(self, target_address: Address) -> bool:
+        target_address = _as_address(target_address)
         return target_address in self.vaults
 
     @gl.public.view
@@ -535,6 +563,7 @@ class StasisGuardian(gl.Contract):
 
     @gl.public.view
     def get_claimable(self, beneficiary: Address) -> u256:
+        beneficiary = _as_address(beneficiary)
         if beneficiary in self.claimable_balances:
             return self.claimable_balances[beneficiary]
         return u256(0)
@@ -555,11 +584,16 @@ class StasisGuardian(gl.Contract):
     # --- Internal helpers -----------------------------------------------------
 
     def _require_vault(self, target_address: Address) -> Vault:
+        # Normalizes too: this is the storage boundary every vault view funnels
+        # through, and an un-normalized str key would silently miss rather than
+        # raise, so a view must never be handed one.
+        target_address = _as_address(target_address)
         if target_address not in self.vaults:
             raise gl.vm.UserError(ERROR_EXPECTED + " vault is not registered")
         return self.vaults[target_address]
 
     def _incident_key(self, target_address: Address, tx_hash: str, incident_id: str) -> int:
+        target_address = _as_address(target_address)
         material = (
             target_address.as_hex
             + "|"
@@ -675,12 +709,26 @@ class StasisGuardian(gl.Contract):
             try:
                 answer = gl.nondet.exec_prompt(prompt, response_format="json")
             except Exception:
-                answer = {}
+                answer = None
+
+            if answer is None:
+                return {
+                    "feed_status": "llm_error",
+                    "is_malicious": False,
+                    "is_false_report": False,
+                    "observed_drop_bps": 0,
+                    "reason_code": "llm_error",
+                }
+
             fields = _extract_fields(answer)
             if not fields["parsed"]:
-                return {"feed_status": "llm_error", "is_malicious": False,
-                        "is_false_report": False, "observed_drop_bps": 0,
-                        "reason_code": "llm_error"}
+                return {
+                    "feed_status": "llm_error",
+                    "is_malicious": False,
+                    "is_false_report": False,
+                    "observed_drop_bps": 0,
+                    "reason_code": "llm_error",
+                }
             return {
                 "feed_status": "ok",
                 "is_malicious": fields["is_malicious"],
@@ -718,7 +766,7 @@ class StasisGuardian(gl.Contract):
             return mine_exceeds == their_exceeds
 
         # The only place non-determinism runs.
-        result = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
+        result = gl.vm.run_nondet(leader_fn, validator_fn)
 
         # --- Deterministic post-processing and state transition ---------------
         feed_status = str(result.get("feed_status", "ok"))

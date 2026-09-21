@@ -57,10 +57,12 @@ def test_register_and_readback(guardian, direct_charlie):
 
 
 def test_register_zero_address_reverts(guardian):
-    from genlayer.py.types import Address
+    # v0.3: the in-process address type is gltest.types.CalldataAddress
+    # (genlayer.py.types.Address is only available inside the contract sandbox).
+    from gltest.types import CalldataAddress
 
     with pytest.raises(Exception):
-        guardian.register_vault(Address(bytes(20)), PRIMARY_FEED, SECONDARY_FEED, 500, 0, 0, True)
+        guardian.register_vault(CalldataAddress(bytes(20)), PRIMARY_FEED, SECONDARY_FEED, 500, 0, 0, True)
 
 
 def test_register_duplicate_reverts(guardian, direct_charlie):

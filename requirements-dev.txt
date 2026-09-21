@@ -1,5 +1,13 @@
 # Development and test dependencies for Stasis Protocol contracts.
 # Install with: pip install -r requirements-dev.txt
-genlayer-test>=0.29.0
-genvm-linter>=0.11.0
+#
+# The GenLayer components are one release-candidate set and move together:
+# genlayer-test drives the runner, genlayer-py is the client the suites and the
+# deploy step talk to the network with, and genvm-linter is the VM's own linter.
+# They are pinned exactly rather than ranged: a >= or a pre-release range lets a
+# different RC in silently, and a linter/runner mismatch surfaces as "Failed to
+# load contract" at validation time rather than as a version error.
+genlayer-py==0.19.0rc2
+genlayer-test==0.30.0rc2
+genvm-linter==0.11.1rc2
 pytest>=8.0

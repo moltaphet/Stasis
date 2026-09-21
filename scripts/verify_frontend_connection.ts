@@ -18,7 +18,7 @@ import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { createClient, createAccount } from "genlayer-js";
+import { createClient, createAccount, isSuccessful } from "genlayer-js";
 import * as chains from "genlayer-js/chains";
 
 // --- config: read the exact same values the frontend uses --------------------
@@ -42,11 +42,17 @@ function loadEnv(): Record<string, string> {
 const env = loadEnv();
 const GUARDIAN = env.NEXT_PUBLIC_GUARDIAN_ADDRESS || process.env.NEXT_PUBLIC_GUARDIAN_ADDRESS || "";
 const TARGET = env.NEXT_PUBLIC_MOCK_VAULT_ADDRESS || process.env.NEXT_PUBLIC_MOCK_VAULT_ADDRESS || "";
-const CHAIN_NAME = env.NEXT_PUBLIC_GENLAYER_CHAIN || "studionet";
+// Consensus v0.6 / Studio v0.123 lives on the studioDevnet preview (chain 61997).
+// "studionet" is stable Studio only: the chain object carries the consensus
+// contract addresses, so the name must match the deployment being addressed.
+const CHAIN_NAME = env.NEXT_PUBLIC_GENLAYER_CHAIN || "studioDevnet";
 
 const chainBag = chains as Record<string, any>;
 const chain =
-  chainBag[CHAIN_NAME] || chainBag.studionet || Object.values(chainBag)[0];
+  chainBag[CHAIN_NAME] ||
+  chainBag.studioDevnet ||
+  chainBag.studionet ||
+  Object.values(chainBag)[0];
 
 // BigInt-safe stringify for logging RPC return values.
 const j = (v: unknown) =>
@@ -126,14 +132,24 @@ async function main(): Promise<number> {
       ],
     };
 
-    // Optional protocol-fee estimation (fee-charging deployments only).
+    // Fees come from the measured profile, exactly as the frontend does it: the
+    // SDK reads the network's live prices and caps and the result is submitted
+    // unchanged. A gasless network returns nothing and nothing is attached.
     try {
-      if (typeof (signer as any).estimateTransactionFeesForWrite === "function") {
-        const est = await (signer as any).estimateTransactionFeesForWrite(call);
+      const profile = JSON.parse(readFileSync(resolve(ROOT, "fee-profile.json"), "utf8"));
+      const entry = profile?.methods?.simulate_signal;
+      if (entry && typeof (signer as any).estimateTransactionFees === "function") {
+        const est = await (signer as any).estimateTransactionFees({
+          leaderTimeunitsAllocation: entry.leaderTimeunitsAllocation ?? "0",
+          validatorTimeunitsAllocation: entry.validatorTimeunitsAllocation ?? "0",
+          executionBudgetPerRound: entry.executionBudgetPerRound ?? "0",
+          totalMessageFees: entry.totalMessageFees ?? "0",
+          rotations: [entry.rotationsPerRound ?? "1"],
+        });
         if (est?.distribution) call.fees = { distribution: est.distribution, feeValue: est.feeValue };
       }
     } catch {
-      /* gasless / no fee model */
+      /* no measured profile, or gasless / no fee model */
     }
 
     const txId = await withTimeout(signer.writeContract(call), 45000, "writeContract");
@@ -141,16 +157,52 @@ async function main(): Promise<number> {
     line(true, "2. send test incident (simulate_signal)", `tx=${String(txId)}`);
 
     // --- 3. Race-free receipt polling ------------------------------------
+    // waitUntil, not the deprecated status: the v0.6 spelling, and the only one
+    // that waits past ACCEPTED to the point where fees are settled. The SDK
+    // defaults to 10 retries at 3s, which a nondet round outlives, so the budget
+    // is raised explicitly - the app does the same.
     const receipt: any = await withTimeout(
-      signer.waitForTransactionReceipt({ hash: txId as any, status: "FINALIZED" as any }),
-      120000,
+      signer.waitForTransactionReceipt({
+        hash: txId as any,
+        waitUntil: "finalized" as any,
+        interval: 4000,
+        retries: 75,
+      }),
+      330000,
       "waitForTransactionReceipt",
     );
-    // GenLayer numeric status: 5 = ACCEPTED, 7 = FINALIZED (both are terminal-good).
+    // A v0.6 receipt carries no flat status: it carries a layered lifecycle of
+    // {state, outcome}. Pre-lifecycle receipts still carry the flat status.
+    const lifecycle = receipt?.lifecycle;
+    const state = String(lifecycle?.state ?? "").toUpperCase();
+    const outcome = String(lifecycle?.outcome ?? "").toUpperCase();
     const STATUS_NAMES: Record<number, string> = { 5: "ACCEPTED", 6: "UNDETERMINED", 7: "FINALIZED" };
     const rawStatus = receipt?.statusName ?? receipt?.status;
-    const statusName =
-      typeof rawStatus === "number" ? STATUS_NAMES[rawStatus] ?? `status(${rawStatus})` : String(rawStatus);
+    const statusName = state
+      ? outcome && outcome !== "ACCEPTED"
+        ? `${state}_${outcome}`
+        : state
+      : typeof rawStatus === "number"
+        ? STATUS_NAMES[rawStatus] ?? `status(${rawStatus})`
+        : String(rawStatus);
+
+    const execResult = String(receipt?.txExecutionResultName ?? "");
+    const execGood = execResult === "FINISHED_WITH_RETURN";
+
+    // Acceptance alone does not prove the call ran: GenVM reports a failed run as
+    // FINISHED_WITH_ERROR while the consensus status still reads accepted, so
+    // success needs both halves of the pair. The SDK's isSuccessful encodes exactly
+    // that pair and is the authority; the literal rule below is the fallback for a
+    // receipt shape the helper cannot read, and it deliberately fails closed. This
+    // mirrors succeeded() in apps/web/lib/genlayer.ts, so the script and the app
+    // agree on what "done" means.
+    let ok: boolean;
+    try {
+      ok = typeof isSuccessful === "function" && Boolean(isSuccessful(receipt));
+    } catch {
+      ok = /FINAL|ACCEPT/i.test(statusName) && execGood;
+    }
+
     const leader = receipt?.consensus_data?.leader_receipt?.[0];
     const verdict =
       leader?.result?.raw ??
@@ -158,8 +210,32 @@ async function main(): Promise<number> {
       leader?.eq_outputs ??
       receipt?.returnValue ??
       "n/a";
-    pollOk = rawStatus === 5 || rawStatus === 7 || /FINAL|ACCEPT/i.test(String(rawStatus));
-    line(pollOk, "3. poll finalized receipt", `status=${statusName} verdict=${j(verdict)}`);
+
+    // The deposit, the consumed part and the refund are three different numbers:
+    // the deposit is escrowed up front and the unused remainder comes back at
+    // finalization.
+    const feeBlock = receipt?.fees;
+    const consumedBlock = feeBlock?.consumed ?? {};
+    const timeUnits =
+      Number(consumedBlock.leaderTimeunitsUsed ?? 0) + Number(consumedBlock.validatorTimeunitsUsed ?? 0);
+    const consumedWei =
+      Number(consumedBlock.executionConsumed ?? 0) +
+      Number(consumedBlock.storageFeeUsed ?? 0) +
+      Number(consumedBlock.messageFeesConsumed ?? 0) +
+      timeUnits * Number(feeBlock?.locked?.genPerTimeUnit ?? 0);
+    const depositWei = Number(feeBlock?.deposit ?? 0);
+
+    pollOk = ok;
+    line(
+      pollOk,
+      "3. poll finalized receipt",
+      `status=${statusName} exec=${execResult || "n/a"} verdict=${j(verdict)}`,
+    );
+    if (depositWei > 0 || consumedWei > 0) {
+      console.log(
+        `      fees: deposited=${depositWei} consumed=${consumedWei} refunded=${Math.max(0, depositWei - consumedWei)} wei`,
+      );
+    }
   } catch (err: any) {
     line(false, "2/3. write + poll", err?.shortMessage || err?.message || String(err));
   }

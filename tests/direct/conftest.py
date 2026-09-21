@@ -71,8 +71,15 @@ def mock_feeds(direct_vm, status: int = 200, body: str = '{"status": "incident"}
 
 
 def mock_analyst(direct_vm, response_json: str) -> None:
-    """Mock the LLM analyst for any adjudication prompt."""
-    direct_vm.mock_llm(r".*DeFi security analyst.*", response_json)
+    """Mock the LLM analyst for any adjudication prompt.
+
+    v0.3 note: the direct-mode mock auto-parses the response once (wasi_mock) and
+    the runtime's exec_prompt(response_format="json") parses again, so a JSON
+    verdict payload must be DOUBLE-serialized to survive both stages and reach the
+    contract as a dict. response_json is already json.dumps(...) of the verdict; we
+    wrap it once more here so callers keep passing single-serialized payloads.
+    """
+    direct_vm.mock_llm(r".*DeFi security analyst.*", json.dumps(response_json))
 
 
 def mock_bad_analyst(direct_vm) -> None:

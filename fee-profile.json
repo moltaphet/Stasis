@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "network": "studio_devnet",
+  "measuredAt": "2026-09-21T05:09:22Z",
+  "chainId": 61997,
+  "deploy": {
+    "leaderTimeunitsAllocation": "125",
+    "validatorTimeunitsAllocation": "250",
+    "executionBudgetPerRound": "98625937500000",
+    "totalMessageFees": "0",
+    "rotationsPerRound": "1"
+  },
+  "methods": {
+    "configure_vault": {
+      "leaderTimeunitsAllocation": "125",
+      "validatorTimeunitsAllocation": "250",
+      "executionBudgetPerRound": "98286562500000",
+      "totalMessageFees": "0",
+      "rotationsPerRound": "1"
+    },
+    "deposit": {
+      "leaderTimeunitsAllocation": "125",
+      "validatorTimeunitsAllocation": "250",
+      "executionBudgetPerRound": "98286250000000",
+      "totalMessageFees": "0",
+      "rotationsPerRound": "1"
+    },
+    "recover": {
+      "leaderTimeunitsAllocation": "125",
+      "validatorTimeunitsAllocation": "250",
+      "executionBudgetPerRound": "98285000000000",
+      "totalMessageFees": "0",
+      "rotationsPerRound": "1"
+    },
+    "register_vault": {
+      "leaderTimeunitsAllocation": "125",
+      "validatorTimeunitsAllocation": "250",
+      "executionBudgetPerRound": "98290937500000",
+      "totalMessageFees": "0",
+      "rotationsPerRound": "1"
+    },
+    "set_min_bond": {
+      "leaderTimeunitsAllocation": "125",
+      "validatorTimeunitsAllocation": "250",
+      "executionBudgetPerRound": "98285625000000",
+      "totalMessageFees": "0",
+      "rotationsPerRound": "1"
+    },
+    "simulate_signal": {
+      "leaderTimeunitsAllocation": "125",
+      "validatorTimeunitsAllocation": "250",
+      "executionBudgetPerRound": "98740000000000",
+      "totalMessageFees": "0",
+      "rotationsPerRound": "1"
+    },
+    "submit_signal": {
+      "leaderTimeunitsAllocation": "125",
+      "validatorTimeunitsAllocation": "250",
+      "executionBudgetPerRound": "98286875000000",
+      "totalMessageFees": "0",
+      "rotationsPerRound": "1"
+    },
+    "withdraw": {
+      "leaderTimeunitsAllocation": "125",
+      "validatorTimeunitsAllocation": "250",
+      "executionBudgetPerRound": "98285000000000",
+      "totalMessageFees": "0",
+      "rotationsPerRound": "1"
+    }
+  }
+}

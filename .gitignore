@@ -17,6 +17,8 @@ build/
 *.log
 .env
 .env.*
+# ...but the template the README tells you to copy must stay tracked.
+!.env.local.example
 
 # OS / editor
 .DS_Store

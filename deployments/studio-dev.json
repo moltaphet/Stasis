@@ -1,0 +1,11 @@
+{
+  "network": "studio_devnet",
+  "chainId": 61997,
+  "rpc": "https://studio-dev.genlayer.com/api",
+  "explorer": "https://explorer-studio-dev.genlayer.com",
+  "consensus": "v0.6 (Studio v0.123 RC) preview",
+  "deployer": "0x79E24abaC34C1F8E99346472e1BfEF58A5713e71",
+  "guardian": "0xE47320c6e8ad2Dd8d32ba885482Cd9dcd08861B1",
+  "mockVault": "0xdC752A89b75ce197c982008D2fbe9Eb46fB12671",
+  "mockVaultRegistered": true
+}

@@ -1,9 +1,16 @@
 # gltest configuration for Stasis Protocol integration tests.
 # Only paths are overridden; network definitions use gltest's built-in defaults
-# (localnet, studionet, testnet_asimov, testnet_bradbury), selected with --network.
+# (localnet, studio_devnet, studionet, testnet_asimov, testnet_bradbury),
+# selected with --network.
 #
 #   Local Studio (real GenVM, recommended):  genlayer up  ->  --network localnet
-#   Hosted StudioNet (gasless):              --network studionet
+#   Studio Devnet preview (fee-charging):    --network studio_devnet
+#   Hosted StudioNet (stable, gasless):      --network studionet
+#
+# The Consensus v0.6 / Studio v0.123 stack lives on the studio_devnet preview.
+# "studionet" is stable Studio and must not be used to validate a v0.6 build:
+# the chain carries the consensus contract addresses, so the network name selects
+# the consensus being tested against.
 paths:
   contracts: contracts/
   artifacts: artifacts/

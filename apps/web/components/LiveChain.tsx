@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { ExternalLink, RefreshCw, Signal } from "lucide-react";
-import { GUARDIAN_ADDRESS, MOCK_VAULT_ADDRESS } from "@/lib/config";
+import { CHAIN_NAME, EXPLORER_URL, GUARDIAN_ADDRESS, MOCK_VAULT_ADDRESS } from "@/lib/config";
 import { fetchReadout } from "@/lib/genlayer";
 
 export interface Confirmed {
@@ -14,14 +14,16 @@ export interface Confirmed {
 
 type Sync = "polling" | "live" | "optimistic";
 
-const EXPLORER = "https://genlayer-explorer.vercel.app";
+// Studio Devnet is a preview the stable Studio explorer does not index, so the
+// explorer is configured explicitly rather than read off the chain object.
+const EXPLORER = EXPLORER_URL;
 
 // Live on-chain readout. Its rows are bound to the SAME simulator state hook that
 // drives the top Breach Simulator (values passed down from Terminal), so both
 // panels flip together across every scenario preset. A real finalized
-// simulate_signal receipt is overlaid on top (tx hash + verdict). When StudioNet's
-// gen_call read path is unavailable, this never shows a blocking fatal error - it
-// shows a subtle sync badge and the optimistic (simulator-derived) state.
+// simulate_signal receipt is overlaid on top (tx hash + verdict). When the read
+// path is unavailable, this never shows a blocking fatal error - it shows a
+// subtle sync badge and the optimistic (simulator-derived) state.
 export default function LiveChain({
   stateLabel,
   stateTone,
@@ -57,10 +59,10 @@ export default function LiveChain({
 
   const badge =
     sync === "polling"
-      ? { dot: "#00E5FF", text: "StudioNet Read Sync: Polling" }
+      ? { dot: "#00E5FF", text: "Read Sync: Polling" }
       : sync === "live"
-        ? { dot: "#00FFA3", text: "StudioNet Read Sync: Live" }
-        : { dot: "#F59E0B", text: "StudioNet Read Sync: Optimistic State" };
+        ? { dot: "#00FFA3", text: "Read Sync: Live" }
+        : { dot: "#F59E0B", text: "Read Sync: Optimistic State" };
 
   return (
     <section className="glass mt-5 overflow-hidden rounded-2xl">
@@ -111,7 +113,7 @@ export default function LiveChain({
         <p className="label mt-3 text-zinc-600">
           {sync === "live"
             ? `guardian ${GUARDIAN_ADDRESS.slice(0, 10)}... - values fetched live from RPC`
-            : "gen_call read path unavailable on StudioNet - rows mirror the simulator + finalized receipts"}
+            : `gen_call read path unavailable on ${CHAIN_NAME} - rows mirror the simulator + finalized receipts`}
         </p>
       </div>
     </section>

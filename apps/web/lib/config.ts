@@ -10,8 +10,17 @@ export const MOCK_VAULT_ADDRESS =
   process.env.NEXT_PUBLIC_MOCK_VAULT_ADDRESS || "";
 
 // Chain selection is resolved by name at runtime against genlayer-js/chains so a
-// missing export never breaks the build. Defaults to studionet (hosted testnet).
-export const CHAIN_NAME = process.env.NEXT_PUBLIC_GENLAYER_CHAIN || "studionet";
+// missing export never breaks the build. Defaults to studioDevnet, the Consensus
+// v0.6 / Studio v0.123 release-candidate preview (chain 61997). Use "studionet"
+// only for stable Studio: chain identity and consensus contract addresses must
+// move together, so never point the stable chain object at the preview RPC.
+export const CHAIN_NAME = process.env.NEXT_PUBLIC_GENLAYER_CHAIN || "studioDevnet";
+
+// Studio Devnet is a preview deployment the stable Studio explorer does not
+// index, so its blockExplorers is undefined on the chain definition and the
+// explorer is configured explicitly here instead.
+export const EXPLORER_URL =
+  process.env.NEXT_PUBLIC_EXPLORER_URL || "https://explorer-studio-dev.genlayer.com";
 
 export const TIER = {
   NORMAL: 0,

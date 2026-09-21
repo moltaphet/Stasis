@@ -193,7 +193,7 @@ pragma solidity ^0.8.20;
 import {IStasisGuardian, CircuitState} from "./IStasisGuardian.sol";
 
 contract SelfGuardedVault {
-    address public constant STASIS_ADDRESS = 0x9DDe7a98385EE602E4EFcB80b28D925e8Cafa3aD;
+    address public constant STASIS_ADDRESS = 0xE47320c6e8ad2Dd8d32ba885482Cd9dcd08861B1;
 
     modifier onlyWhenStasisActive() {
         require(
@@ -323,8 +323,13 @@ transitions happen deterministically after consensus resolves.
 ### Prerequisites
 
 ```bash
-pip install -r requirements-dev.txt   # genlayer-test, genvm-linter, pytest
+pip install -r requirements-dev.txt   # genlayer-py, genlayer-test, genvm-linter, pytest
 ```
+
+The GenLayer components are one release-candidate set and move together, so
+`requirements-dev.txt` pins each exactly rather than ranging over it. A linter built
+for a different VM than the one running the contract surfaces as a load failure
+("Failed to load contract") rather than as a version mismatch.
 
 ### Direct-mode tests (fast, in-memory, no Docker)
 
@@ -332,7 +337,7 @@ pip install -r requirements-dev.txt   # genlayer-test, genvm-linter, pytest
 pytest tests/direct/ -v
 ```
 
-34 tests run in well under a second against the in-memory GenVM. They cover the
+42 tests run in well under a minute against the in-memory GenVM. They cover the
 full lifecycle (deposit -> signal -> trip -> withdraw bounty -> recover), replay
 rejection, multi-feed discrepancy, transient/LLM fault tolerance, reporter bond
 refund/slash, and the solvency invariant.
@@ -340,19 +345,56 @@ refund/slash, and the solvency invariant.
 ### Linter
 
 ```bash
-genvm-lint check contracts/stasis_guardian.py
-genvm-lint check contracts/mock_vault.py
+genvm-lint lint contracts/stasis_guardian.py
+genvm-lint lint contracts/mock_vault.py
+genvm-lint validate contracts/mock_vault.py
 ```
+
+`genvm-lint validate` is run on the mock vault only. Its validator sets
+`GENERATING_DOCS=true`, which makes the SDK read a `return` annotation off a
+generated wrapper that carries none (`KeyError: 'return'`) for any
+`@gl.evm.contract_interface` that declares a method in its `View` class. The
+guardian's `ITargetVault.View.is_paused` is required by the vault interface spec, so
+the interface stays and the guardian is validated by deploying it and running the
+integration suite instead. This is a linter gap, not a contract defect: the same
+contract runs green under direct mode and on live GenVM.
 
 ### Integration tests (full consensus, requires a live GenLayer environment)
 
 ```bash
-gltest tests/integration/ -v -s --network localnet   # against a local `genlayer up`
+gltest tests/integration/ -v -s --network localnet        # against a local `genlayer up`
+gltest tests/integration/ -v -s --network studio_devnet   # the v0.6 preview, fee-charging
 ```
 
 See `tests/integration/README.md` for environment notes. The deterministic pipeline
 runs without an LLM; adjudication tests that require a real verdict are gated behind
 `STASIS_INTEGRATION_LLM=1`.
+
+Use `studio_devnet`, not `studionet`, to validate a v0.6 build. The chain object
+carries the consensus contract addresses, so the network name selects the consensus
+being tested against - and `studionet` is stable Studio, not the preview.
+
+### Fee profile (required after any contract, GenVM, Studio or fee-policy change)
+
+```bash
+make profile      # re-measures from real finalized transactions -> fee-profile.json
+```
+
+Consensus v0.6 charges per transaction, so every write must carry a
+`FeesDistribution` and its quoted fee value. The frontend does not compute that
+distribution: it reads the measured work profile from `fee-profile.json` and lets the
+SDK apply the network's live prices and caps at estimate time
+(`apps/web/lib/fees.ts`). The profile therefore only has to describe how much *work*
+a method does, and unused budget is refunded at finalization.
+
+A stale profile under-allocates and the network rejects the write before the contract
+ever runs - `FeesDistributionMissing` / `FeeValueMustBeNonZero`, which reads like a
+contract error but is a submission error. Re-run `make profile` whenever any of the
+four inputs above changes.
+
+Profiling must read a **finalized** receipt. A decided receipt reports
+`executionConsumed` as 0, because the protocol only settles the deposit and computes
+the refund at finalization, so profiling off one measures every method as free.
 
 ### Frontend dashboard
 
@@ -371,49 +413,92 @@ NODE_PATH="$(pwd)/apps/web/node_modules" npx tsx scripts/verify_frontend_connect
 ```
 
 Reads the exact frontend config and runs read -> write -> receipt-poll against the
-configured chain, using the same `genlayer-js` client the browser uses.
+configured chain, using the same `genlayer-js` client the browser uses. It asserts
+success the way the app does - a terminal-good *status* **and** a
+`FINISHED_WITH_RETURN` *execution result* - and prints the fee deposit, the consumed
+part and the refund as three separate numbers.
 
 ---
 
 ## 6. Deployment and Addresses
 
+Consensus **v0.6** (Studio **v0.123** RC) on the **Studio Devnet preview**. The
+authoritative record is `deployments/studio-dev.json`, written by `make deploy`.
+
 | Field                 | Value                                          |
 | --------------------- | ---------------------------------------------- |
-| Network               | GenLayer StudioNet (gasless)                   |
-| Chain ID              | `61999`                                        |
-| RPC endpoint          | `https://studio.genlayer.com/api`              |
-| Stasis Guardian       | `0x9DDe7a98385EE602E4EFcB80b28D925e8Cafa3aD`   |
-| Mock target vault     | `0xeD069bb5B08d63cAF210c40764d1dD6E7717FC4d`   |
+| Network               | GenLayer Studio Devnet (preview, fee-charging) |
+| Chain ID              | `61997`                                        |
+| RPC endpoint          | `https://studio-dev.genlayer.com/api`          |
+| Explorer              | `https://explorer-studio-dev.genlayer.com`     |
+| Stasis Guardian       | `0xE47320c6e8ad2Dd8d32ba885482Cd9dcd08861B1`   |
+| Mock target vault     | `0xdC752A89b75ce197c982008D2fbe9Eb46fB12671`   |
 
-StudioNet is gasless: an account with a 0 GEN balance can deploy and transact.
+Unlike stable StudioNet, Studio Devnet charges fees: writes must carry a fee
+distribution (see the fee profile above). Studio Devnet is a preview network and may
+be reset, so durable production-like testing belongs on Bradbury, once the compatible
+v0.6 stack is promoted there.
 
-Note on read availability: at time of writing, StudioNet's `gen_call` read path
-intermittently returns "Contract not found" for finalized contracts (a hosted-node
-issue reproduced across the CLI, gltest, and genlayer-js). Writes finalize normally.
-The dashboard handles this by degrading to receipt-derived optimistic state with a
-`StudioNet Read Sync` status badge rather than a fatal error, and by driving live
-state from finalized `simulate_signal` receipts.
+Note on read availability: at time of writing, hosted Studio's `gen_call` read path
+intermittently returns "Contract not found" for finalized contracts (an issue
+reproduced across the CLI, gltest, and genlayer-js). Writes finalize normally. The
+dashboard handles this by degrading to receipt-derived optimistic state with a
+`Read Sync` status badge rather than a fatal error, and by driving live state from
+finalized `simulate_signal` receipts.
 
 ### Ephemeral Reviewer Mode (zero-friction evaluation)
 
 The dashboard exposes a one-click **Reviewer Mode** that generates an ephemeral
-in-browser account with `genlayer-js` `createAccount()`. Because StudioNet is
-gasless, this account can immediately exercise the contract with no wallet install,
-seed phrase, or funding.
+in-browser account with `genlayer-js` `createAccount()`. No wallet install, seed
+phrase, or funding is required to exercise the contract.
 
 1. Open the dashboard (`apps/web`).
 2. Click **1-Click Reviewer Mode** in the Guardian Access panel.
 3. Click **Simulate Exploit Attack**. With Reviewer Mode active this broadcasts a
-   real `simulate_signal` transaction to StudioNet in addition to the deterministic
-   preview.
-4. The transaction is polled to a finalized receipt (status 7). The circuit state
-   flips to `TRIPPED`, the verdict tier (`CRITICAL_BREACH`) is surfaced, and the Live
-   Chain Readout shows the real finalized transaction hash with an explorer link.
+   real `simulate_signal` transaction to Studio Devnet in addition to the
+   deterministic preview.
+4. The transaction is polled to a **finalized** receipt. The circuit state flips to
+   `TRIPPED`, the verdict tier (`CRITICAL_BREACH`) is surfaced, and the Live Chain
+   Readout shows the real finalized transaction hash with an explorer link.
 5. Click **Reset System** to restore both panels to `ARMED` / `0.0%` / `0.00 GEN`.
 
 Strict EIP-6963 provider selection (`rdns === "io.metamask"`) is used for optional
 browser-wallet connection so a Phantom-injected provider cannot hijack MetaMask Snap
 calls.
+
+### Consensus v0.6 constraints
+
+Three v0.6 behaviours are load-bearing here and are easy to regress:
+
+- **Runner header blank line.** Line 1 of a contract must be exactly
+  `# { "Depends": "py-genlayer:<hash>" }` and line 2 must be blank. Dropping the
+  blank line fails deployment with `invalid_contract runner malformed`.
+- **Address parameters arrive as `str`.** An `Address`-annotated parameter is only
+  decoded into an `Address` when the caller tags the calldata as an address. An
+  untagged call - the Studio write UI, a schema-free client, a raw RPC call - arrives
+  as a plain `str`, and the storage descriptors require the real wrapper
+  (`AddrDesc.set` calls `.as_bytes`). An un-normalized `str` therefore raises
+  `AttributeError` on write and *silently misses* on lookup, since a `str` key never
+  equals an `Address` key. Every public method that takes an address normalizes it on
+  entry via `_as_address`.
+- **Fees settle at finalization.** Wait for `finalized` (`wait_until=` in Python,
+  `waitUntil:` in genlayer-js), not `decided`/`ACCEPTED`. A decided receipt reports
+  `executionConsumed` as 0. The genlayer-js default polling budget is 10 retries at
+  3s, which a nondet round outlives, so `apps/web/lib/genlayer.ts` sets an explicit
+  budget. gltest's own `deploy()` defaults to waiting for `ACCEPTED`, and records the
+  deploy's fee observation from that receipt, so the integration fixture and the
+  deploy step both pass `wait_until="finalized"` explicitly - otherwise the profile's
+  `deploy` entry reads as free.
+
+One item in the migration guide does not apply here, and it is worth saying why
+rather than leaving it looking skipped:
+
+- **`submitAppeal` -> `appealTransaction`.** The guide replaces direct public
+  `submitAppeal` calls with the SDK's `appealTransaction` / `appeal_transaction`
+  helper. Nothing in this repo appeals a transaction - the grep is empty - because
+  the guardian settles each incident in one round and has no appeal entry point. If
+  an appeal path is ever added, it must go through the SDK helper; the guide reserves
+  the direct call for explicit low-level conformance against an already-funded round.
 
 ---
 
@@ -427,9 +512,14 @@ tests/
   direct/                # In-memory direct-mode tests (no Docker)
   integration/           # Full-consensus tests against a live environment
 apps/web/                # Next.js operations terminal / dashboard
+  lib/fees.ts            # Measured-profile -> SDK fee estimate
+  lib/genlayer.ts        # Isolated genlayer-js integration (receipts, fees, verdicts)
 scripts/
   verify_frontend_connection.ts   # read -> write -> poll connectivity check
   ascii_scan.sh                    # pure-ASCII gate
+deployments/
+  studio-dev.json        # What is deployed where (written by `make deploy`)
+fee-profile.json         # Measured per-method fee profile (written by `make profile`)
 specs/                   # Specification, data model, and hardening plan
 ```
 

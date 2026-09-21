@@ -8,16 +8,22 @@
 // (There is no get_vault_state / get_telemetry / submit_incident - those names do
 // not exist on the contract.)
 
-import { createClient, createAccount } from "genlayer-js";
+import { createClient, createAccount, isSuccessful } from "genlayer-js";
 import * as chains from "genlayer-js/chains";
 import { CHAIN_NAME, GUARDIAN_ADDRESS } from "./config";
+import { estimateFeesFromProfile } from "./fees";
 
 type AnyClient = any;
 
+// The chain object is resolved by name and never synthesized: consensus contract
+// addresses are part of a chain's identity, so the preview RPC must be reached
+// through the preview chain definition (studioDevnet) rather than by editing the
+// stable one. The fallback order only keeps the app bootable if a name is typoed.
 function resolveChain(): any {
   const bag = chains as Record<string, any>;
   return (
     bag[CHAIN_NAME] ||
+    bag.studioDevnet ||
     bag.studionet ||
     bag.testnetAsimov ||
     bag.localnet ||
@@ -125,6 +131,27 @@ const STATUS_NAMES: Record<number, string> = {
   7: "FINALIZED",
 };
 
+// A v0.6 receipt carries no flat status field: it carries a layered lifecycle of
+// {state, outcome}, where the outcome ("accepted" / something else) is what
+// decides whether consensus actually accepted the transaction. Pre-lifecycle
+// receipts still carry the flat status, so both shapes are read.
+function statusFromReceipt(receipt: any): string {
+  const lifecycle = receipt?.lifecycle;
+  if (lifecycle && typeof lifecycle === "object") {
+    const state = String(lifecycle.state ?? "").toUpperCase();
+    const outcome = String(lifecycle.outcome ?? "").toUpperCase();
+    if (!state) return "UNKNOWN";
+    if (state === "DECIDED" || state === "FINALIZED") {
+      return outcome && outcome !== "ACCEPTED" ? `${state}_${outcome}` : state;
+    }
+    return state;
+  }
+  const raw = receipt?.statusName ?? receipt?.status;
+  if (typeof raw === "number") return STATUS_NAMES[raw] ?? `status(${raw})`;
+  if (raw == null) return "UNKNOWN";
+  return String(raw);
+}
+
 // Discrete verdict tiers (mirror of contracts/stasis_guardian.py).
 export const TIER = {
   NORMAL: 0,
@@ -139,12 +166,89 @@ export const TIER_LABEL: Record<number, string> = {
   3: "MALICIOUS_REPORT",
 };
 
+// Fee accounting as three separate numbers. Consensus v0.6 escrows one deposit per
+// transaction and refunds the unused part at finalization, so the amount paid up
+// front, the amount actually consumed, and the amount returned are all distinct
+// and must not be collapsed into a single "cost".
+export interface FeeAccounting {
+  deposit: number; // wei escrowed at submission
+  consumed: number; // wei actually spent on consensus + execution
+  refunded: number; // wei returned at finalization
+  known: boolean; // false when the receipt carries no fee_accounting block
+}
+
 export interface WriteResult {
   txId: string;
   status: string;
+  executionResult: string; // FINISHED_WITH_RETURN on a genuinely successful run
   ok: boolean;
   tier: number;
   tierLabel: string;
+  fees: FeeAccounting;
+}
+
+// The execution-result half of the success pair. A receipt that reached a
+// terminal-good status may still have failed to run: GenVM reports that as
+// FINISHED_WITH_ERROR (or a bare ERROR) while the consensus status stays ACCEPTED.
+function executionResultName(receipt: any): string {
+  const raw =
+    receipt?.txExecutionResultName ??
+    receipt?.execution_result ??
+    receipt?.consensus_data?.leader_receipt?.[0]?.execution_result;
+  return typeof raw === "string" ? raw : "";
+}
+
+// Success requires BOTH a terminal-good status and FINISHED_WITH_RETURN. The
+// SDK's isSuccessful encodes exactly that pair, so it is the authority; the
+// literal rule below is the fallback for a receipt shape the helper cannot read,
+// and it deliberately fails closed.
+function succeeded(receipt: any, status: string): boolean {
+  try {
+    if (typeof isSuccessful === "function") return isSuccessful(receipt);
+  } catch {
+    /* fall through to the rule isSuccessful encodes */
+  }
+  return /FINAL|ACCEPT/i.test(status) && executionResultName(receipt) === "FINISHED_WITH_RETURN";
+}
+
+// Receipt polling budget. The SDK defaults to 10 retries at 3s - thirty seconds -
+// which a nondet round does not finish in: the transaction is still ACCEPTED when
+// the poll gives up, and the caller reads a timeout instead of a result. A
+// genuinely failed transaction still returns as soon as it reaches a terminal
+// state, so this is a ceiling, not a wait.
+const RECEIPT_POLL_INTERVAL_MS = 4000;
+const RECEIPT_POLL_RETRIES = 75; // ~5 minutes
+
+// A finalized receipt settles the fee deposit and reports what was actually used.
+// The deposit, the consumed part and the refund are three different numbers and
+// must not be collapsed into one "cost": the deposit is escrowed up front, only
+// the consumed part is spent, and the remainder comes back at finalization.
+function feeAccounting(receipt: any): FeeAccounting {
+  const fees = receipt?.fees ?? receipt?.data?.fees;
+  if (fees == null) return { deposit: 0, consumed: 0, refunded: 0, known: false };
+
+  const deposit = toNum(fees.deposit);
+  const consumedBlock = fees.consumed ?? {};
+  const locked = fees.locked ?? {};
+
+  // Consensus work is billed in time units at the price locked in at submission;
+  // execution, storage and messages are billed directly in wei.
+  const timeUnits = toNum(consumedBlock.leaderTimeunitsUsed) + toNum(consumedBlock.validatorTimeunitsUsed);
+  const consumed =
+    toNum(consumedBlock.executionConsumed) +
+    toNum(consumedBlock.storageFeeUsed) +
+    toNum(consumedBlock.messageFeesConsumed) +
+    timeUnits * toNum(locked.genPerTimeUnit);
+
+  if (deposit === 0 && consumed === 0) {
+    return { deposit: 0, consumed: 0, refunded: 0, known: false };
+  }
+  return {
+    deposit,
+    consumed,
+    refunded: Math.max(0, deposit - consumed),
+    known: true,
+  };
 }
 
 export interface IncidentPayload {
@@ -191,33 +295,48 @@ export async function submitIncident(
     ],
   };
 
-  try {
-    if (typeof session.client.estimateTransactionFeesForWrite === "function") {
-      const est = await session.client.estimateTransactionFeesForWrite(call);
-      if (est?.distribution) call.fees = { distribution: est.distribution, feeValue: est.feeValue };
-    }
-  } catch {
-    /* gasless / no fee model */
-  }
+  // Fees are estimated from the measured profile, and the estimate the SDK hands
+  // back is submitted unchanged. Nothing is computed here: the SDK reads the
+  // network's live prices and caps at estimate time.
+  const feeAttachment = await estimateFeesFromProfile(session.client, "simulate_signal");
+  if (feeAttachment) call.fees = feeAttachment;
 
   const txId = await session.client.writeContract(call);
 
   let status = "PENDING";
+  let executionResult = "";
   let ok = false;
   let tier: number = payload.expectedTier;
+  let fees: FeeAccounting = { deposit: 0, consumed: 0, refunded: 0, known: false };
   try {
+    // Wait for finalization, not acceptance. In v0.6 the deprecated `status`
+    // argument is ignored and the call returns at ACCEPTED, before the protocol
+    // settles the fee deposit - a receipt taken there reports executionConsumed
+    // as 0, so the fee breakdown would read as free. `waitUntil` is the v0.6
+    // spelling, and "finalized" is the point at which the refund exists.
     const receipt: any = await session.client.waitForTransactionReceipt({
       hash: txId,
-      status: "FINALIZED",
+      waitUntil: "finalized",
+      interval: RECEIPT_POLL_INTERVAL_MS,
+      retries: RECEIPT_POLL_RETRIES,
     });
-    const raw = receipt?.statusName ?? receipt?.status;
-    status = typeof raw === "number" ? STATUS_NAMES[raw] ?? `status(${raw})` : String(raw);
-    ok = raw === 5 || raw === 7 || /FINAL|ACCEPT/i.test(String(raw));
+    status = statusFromReceipt(receipt);
+    executionResult = executionResultName(receipt);
+    ok = succeeded(receipt, status);
+    fees = feeAccounting(receipt);
     tier = verdictFromReceipt(receipt, payload.expectedTier);
   } catch (err) {
     console.warn("[stasis] receipt wait failed:", err);
     status = "RECEIPT_TIMEOUT";
   }
 
-  return { txId: String(txId), status, ok, tier, tierLabel: TIER_LABEL[tier] ?? "UNKNOWN" };
+  return {
+    txId: String(txId),
+    status,
+    executionResult,
+    ok,
+    tier,
+    tierLabel: TIER_LABEL[tier] ?? "UNKNOWN",
+    fees,
+  };
 }

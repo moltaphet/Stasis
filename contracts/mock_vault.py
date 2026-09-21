@@ -1,14 +1,16 @@
-# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
+# { "Depends": "py-genlayer:5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng" }
+
 # Mock target vault: a direct-mode stand-in for an EVM DeFi vault.
 # It exposes the same surface the guardian expects on a real target
 # (pause() and is_paused()), so cross-contract behavior can be exercised
 # without a live EVM chain. Constitution Principle II: pure ASCII, exact
 # dependency header, sized storage primitives, no raw containers in storage.
 
+import genlayer as gl
 from genlayer import *
 
 
-class MockVault(gl.Contract):
+class MockVault(gl.contract.Contract):
     # Persistent storage: a single boolean halt flag.
     paused: bool
 

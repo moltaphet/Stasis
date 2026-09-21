@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, ChevronDown, Copy, LogOut, ShieldCheck, Wallet } from "lucide-react";
 import { useWallet } from "@/components/WalletProvider";
+import { CHAIN_NAME } from "@/lib/config";
 
 const NAV = [
   { label: "Dashboard", href: "#dashboard" },
@@ -10,7 +11,11 @@ const NAV = [
   { label: "FAQ", href: "#faq" },
 ];
 
-const NETWORKS = ["GenLayer StudioNet", "GenLayer Testnet", "Localnet"];
+// Presentation-only selector. The app is pinned to the chain named at build time
+// by NEXT_PUBLIC_GENLAYER_CHAIN, so the first entry mirrors that chain instead of
+// naming a network the build is not actually talking to.
+const CHAIN_LABEL = CHAIN_NAME === "studioDevnet" ? "GenLayer Studio Devnet" : CHAIN_NAME;
+const NETWORKS = [CHAIN_LABEL, "GenLayer StudioNet", "GenLayer Testnet", "Localnet"];
 
 function short(addr: string) {
   return `${addr.slice(0, 6)}...${addr.slice(-4)}`;

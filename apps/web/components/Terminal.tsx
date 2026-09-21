@@ -15,7 +15,7 @@ import {
   Zap,
 } from "lucide-react";
 import { GUARDIAN_ADDRESS, MOCK_VAULT_ADDRESS } from "@/lib/config";
-import { submitIncident, type ReviewerSession } from "@/lib/genlayer";
+import { submitIncident, type FeeAccounting, type ReviewerSession } from "@/lib/genlayer";
 import { SCENARIOS, SCENARIO_ORDER, type Scenario, type ScenarioId } from "@/lib/scenarios";
 import { useWallet } from "@/components/WalletProvider";
 import LiveChain from "./LiveChain";
@@ -25,6 +25,17 @@ import LiveChain from "./LiveChain";
 const PRIMARY = 1850;
 const ESCROW_GEN = 5.0;
 const THRESHOLD = 15.0;
+
+const WEI_PER_GEN = 1e18;
+
+// Fee amounts arrive in wei; a whole GEN is 1e18 of them, so a bare integer would
+// be unreadable. Small amounts keep more precision than large ones.
+function formatGen(wei: number): string {
+  const gen = wei / WEI_PER_GEN;
+  if (gen === 0) return "0 GEN";
+  if (gen < 0.000001) return `${gen.toExponential(2)} GEN`;
+  return `${gen.toFixed(gen < 0.01 ? 8 : 6)} GEN`;
+}
 
 const T_ANOMALY = 1000;
 const T_SWEEP = 2600;
@@ -177,8 +188,10 @@ export default function Terminal() {
     state: "idle" | "submitting" | "done" | "error";
     txId?: string;
     status?: string;
+    executionResult?: string;
     tier?: number;
     tierLabel?: string;
+    fees?: FeeAccounting;
     error?: string;
   }>({ state: "idle" });
 
@@ -210,7 +223,15 @@ export default function Terminal() {
         description: scenario.description,
         expectedTier: scenario.tier,
       });
-      setTx({ state: res.ok ? "done" : "error", txId: res.txId, status: res.status, tier: res.tier, tierLabel: res.tierLabel });
+      setTx({
+        state: res.ok ? "done" : "error",
+        txId: res.txId,
+        status: res.status,
+        executionResult: res.executionResult,
+        tier: res.tier,
+        tierLabel: res.tierLabel,
+        fees: res.fees,
+      });
     } catch (err: any) {
       setTx({ state: "error", error: err?.shortMessage || err?.message || String(err) });
     }
@@ -458,8 +479,44 @@ export default function Terminal() {
                   <span className="h-2 w-2 animate-ping rounded-full bg-cyan" /> Broadcasting simulate_signal...
                 </p>
               )}
-              {tx.state === "done" && <p className="label tnum font-mono text-mint">tx {tx.txId?.slice(0, 10)}... {tx.status} :: {tx.tierLabel}</p>}
-              {tx.state === "error" && <p className="label tnum font-mono text-crimson">tx failed: {(tx.error || tx.status || "error").slice(0, 60)}</p>}
+              {tx.state === "done" && (
+                <div className="space-y-1">
+                  <p className="label tnum font-mono text-mint">
+                    tx {tx.txId?.slice(0, 10)}... {tx.status} :: {tx.executionResult} :: {tx.tierLabel}
+                  </p>
+                  {tx.fees?.known && (
+                    // Consensus v0.6 escrows one deposit per transaction and refunds
+                    // the unused part at finalization, so these are three different
+                    // numbers and are shown as such rather than as one "cost".
+                    <div className="flex flex-wrap gap-x-4 gap-y-0.5">
+                      <span className="label tnum font-mono text-zinc-500">
+                        deposited <span className="text-zinc-300">{formatGen(tx.fees.deposit)}</span>
+                      </span>
+                      <span className="label tnum font-mono text-zinc-500">
+                        consumed <span className="text-amber-400">{formatGen(tx.fees.consumed)}</span>
+                      </span>
+                      <span className="label tnum font-mono text-zinc-500">
+                        refunded <span className="text-mint">{formatGen(tx.fees.refunded)}</span>
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
+              {tx.state === "error" && (
+                <div className="space-y-1">
+                  <p className="label tnum font-mono text-crimson">
+                    tx not completed: {(tx.error || tx.status || "error").slice(0, 60)}
+                    {tx.executionResult ? ` :: ${tx.executionResult}` : ""}
+                  </p>
+                  {tx.fees?.known && (
+                    <p className="label tnum font-mono text-zinc-500">
+                      deposited <span className="text-zinc-300">{formatGen(tx.fees.deposit)}</span>{" "}
+                      · consumed <span className="text-amber-400">{formatGen(tx.fees.consumed)}</span> · refunded{" "}
+                      <span className="text-mint">{formatGen(tx.fees.refunded)}</span>
+                    </p>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         </section>
