@@ -1,40 +1,34 @@
 "use client";
 
 import { useState } from "react";
-import {
-  BookOpen,
-  Check,
-  Copy,
-  Fingerprint,
-  GitBranch,
-  Hash,
-  MessageCircle,
-  Send,
-  ShieldCheck,
-} from "lucide-react";
-import { GUARDIAN_ADDRESS } from "@/lib/config";
+import { Check, Copy, ExternalLink, ShieldCheck } from "lucide-react";
+import { CHAIN_NAME, EXPLORER_URL, GUARDIAN_ADDRESS, REPO_URL, TARGET_VAULT_ADDRESS } from "@/lib/config";
 
-const COLUMNS = [
+// Every link resolves to something real: the deployed contracts on the explorer,
+// the contract sources, and the GenLayer documentation.
+const COLUMNS: { title: string; links: { label: string; href: string }[] }[] = [
   {
-    title: "Protocol",
-    links: ["Architecture", "Smart Contracts", "Sentinel Nodes", "Bug Bounty"],
+    title: "Deployment",
+    links: [
+      { label: "Guardian on explorer", href: `${EXPLORER_URL}/address/${GUARDIAN_ADDRESS}` },
+      { label: "Target vault on explorer", href: `${EXPLORER_URL}/address/${TARGET_VAULT_ADDRESS}` },
+    ],
   },
   {
-    title: "Developers",
-    links: ["SDK & NPM Package", "GenLayer Docs", "Audits", "GitHub Repository"],
+    title: "Source",
+    links: [
+      { label: "Repository", href: REPO_URL },
+      { label: "Guardian contract", href: `${REPO_URL}/blob/main/contracts/stasis_guardian.py` },
+      { label: "Reference vault", href: `${REPO_URL}/blob/main/contracts/reference_vault.py` },
+    ],
   },
   {
-    title: "Governance & Economy",
-    links: ["GEN Tokenomics", "Incident Council", "Grants"],
+    title: "GenLayer",
+    links: [
+      { label: "Documentation", href: "https://docs.genlayer.com" },
+      { label: "Studio Devnet explorer", href: EXPLORER_URL },
+    ],
   },
-];
-
-const SOCIALS = [
-  { label: "Discord", Icon: MessageCircle },
-  { label: "X", Icon: Hash },
-  { label: "Telegram", Icon: Send },
-  { label: "Mirror", Icon: BookOpen },
-  { label: "GitHub", Icon: GitBranch },
 ];
 
 export default function Footer() {
@@ -70,47 +64,33 @@ export default function Footer() {
               </div>
             </div>
           </div>
-          <div className="flex items-center gap-2 rounded-full border border-mint/25 bg-mint/5 px-3 py-1.5">
-            <span className="relative flex h-2 w-2">
-              <span className="absolute inline-flex h-full w-full animate-pulse-ring rounded-full bg-mint/70" />
-              <span className="relative inline-flex h-2 w-2 rounded-full bg-mint" />
-            </span>
-            <span className="label text-mint">All Systems Operational</span>
+          <div className="flex items-center gap-2 rounded-full border border-white/15 bg-white/5 px-3 py-1.5">
+            <span className="label text-zinc-300">Network: {CHAIN_NAME}</span>
           </div>
         </div>
 
         {/* Columns */}
-        <div className="grid grid-cols-2 gap-8 py-8 md:grid-cols-4">
+        <div className="grid grid-cols-2 gap-8 py-8 md:grid-cols-3">
           {COLUMNS.map((col) => (
             <div key={col.title}>
               <div className="label text-zinc-500">{col.title}</div>
               <ul className="mt-4 space-y-2.5">
                 {col.links.map((l) => (
-                  <li key={l}>
-                    <a href="#" className="text-sm text-zinc-400 transition-colors hover:text-white">
-                      {l}
+                  <li key={l.label}>
+                    <a
+                      href={l.href}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 text-sm text-zinc-400 transition-colors hover:text-white"
+                    >
+                      {l.label}
+                      <ExternalLink className="h-3 w-3" />
                     </a>
                   </li>
                 ))}
               </ul>
             </div>
           ))}
-          <div>
-            <div className="label text-zinc-500">Community & Socials</div>
-            <div className="mt-4 flex flex-wrap gap-2">
-              {SOCIALS.map((s) => (
-                <a
-                  key={s.label}
-                  href="#"
-                  title={s.label}
-                  aria-label={s.label}
-                  className="grid h-9 w-9 place-items-center rounded-lg border border-white/10 bg-white/5 text-zinc-400 transition-all hover:border-mint/40 hover:text-mint"
-                >
-                  <s.Icon className="h-4 w-4" />
-                </a>
-              ))}
-            </div>
-          </div>
         </div>
 
         {/* Bottom row */}
@@ -123,14 +103,10 @@ export default function Footer() {
               {copied ? <Check className="h-3.5 w-3.5 text-mint" /> : <Copy className="h-3.5 w-3.5" />}
               <span>{`${addr.slice(0, 10)}...${addr.slice(-6)}`}</span>
             </button>
-            <span className="flex items-center gap-1.5 rounded-lg border border-cyan/25 bg-cyan/5 px-3 py-1.5 text-cyan">
-              <Fingerprint className="h-3.5 w-3.5" />
-              <span className="label">ZK-Verified</span>
-            </span>
           </div>
           <div className="text-xs text-zinc-500">
             <span className="text-zinc-600">
-              Not financial advice. Testnet preview - deterministic simulation only.
+              Not financial advice. Studio Devnet preview deployment; scenario animations are off-chain previews and on-chain drills never settle.
             </span>
             <span className="mx-2 text-zinc-700">|</span>
             (c) 2026 STASIS PROTOCOL

@@ -35,8 +35,32 @@ STATE_TRIPPED = 1
 STATE_RESTORED = 2
 STATE_RATE_LIMITED = 3
 
-PRIMARY_FEED = "https://feed-a.example.com/vault/telemetry"
-SECONDARY_FEED = "https://feed-b.example.com/vault/telemetry"
+# Two independent, public, keyless block explorers. The guardian substitutes the
+# reported transaction hash for {tx_hash}, so validators fetch evidence about
+# exactly that transaction.
+PRIMARY_FEED = "https://eth.blockscout.com/api/v2/transactions/{tx_hash}"
+SECONDARY_FEED = "https://api.blockchair.com/ethereum/dashboards/transaction/{tx_hash}"
+
+PAYOUT_NONE = 0
+PAYOUT_PENDING = 1
+PAYOUT_DISPUTED = 2
+PAYOUT_SETTLED = 3
+PAYOUT_OVERTURNED = 4
+
+# A real Ethereum mainnet transaction and its recipient, used to exercise the live
+# feeds end to end.
+MAINNET_TX = "0x5c504ed432cb51138bcf09aa5e8a410dd4a1e204ef84bfed1be16dfba1b22060"
+MAINNET_TX_TO = "0x5df9b87991262f6ba471f09758cde1c0fc1de734"
+
+
+def tx(n: int) -> str:
+    """A well-formed transaction hash: 0x + 64 hex digits."""
+    return "0x" + format(n, "064x")
+
+
+def bound_body(target: str, tx_hash: str, note: str) -> str:
+    """A drill feed body that references the target and the reported tx."""
+    return '{"to": "' + target + '", "hash": "' + tx_hash + '", "note": "' + note + '"}'
 
 LLM_AVAILABLE = os.environ.get("STASIS_INTEGRATION_LLM") == "1"
 requires_llm = pytest.mark.skipif(

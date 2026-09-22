@@ -14,6 +14,7 @@
  *   NODE_PATH="$(pwd)/apps/web/node_modules" npx tsx scripts/verify_frontend_connection.ts
  */
 
+import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -41,7 +42,7 @@ function loadEnv(): Record<string, string> {
 
 const env = loadEnv();
 const GUARDIAN = env.NEXT_PUBLIC_GUARDIAN_ADDRESS || process.env.NEXT_PUBLIC_GUARDIAN_ADDRESS || "";
-const TARGET = env.NEXT_PUBLIC_MOCK_VAULT_ADDRESS || process.env.NEXT_PUBLIC_MOCK_VAULT_ADDRESS || "";
+const TARGET = env.NEXT_PUBLIC_TARGET_VAULT_ADDRESS || process.env.NEXT_PUBLIC_TARGET_VAULT_ADDRESS || "";
 // Consensus v0.6 / Studio v0.123 lives on the studioDevnet preview (chain 61997).
 // "studionet" is stable Studio only: the chain object carries the consensus
 // contract addresses, so the name must match the deployment being addressed.
@@ -119,16 +120,19 @@ async function main(): Promise<number> {
     console.log(`\n  ephemeral reviewer account: ${account.address}`);
     const signer = createClient({ chain, account } as any);
 
+    if (!TARGET) throw new Error("NEXT_PUBLIC_TARGET_VAULT_ADDRESS is not set");
+    // A non-settling drill: both bodies must name the target and the tx hash, or
+    // the guardian rejects them as unbound evidence.
+    const txHash = "0x" + randomBytes(32).toString("hex");
+    const bind = (fields: Record<string, unknown>) => JSON.stringify({ vault: TARGET, tx_hash: txHash, ...fields });
     const call: any = {
       address: GUARDIAN,
       functionName: "simulate_signal",
       args: [
-        TARGET || GUARDIAN,
-        "0xverify-" + Date.now().toString(16),
-        "verify-" + Date.now().toString(16),
-        '{"tvl_drop_bps": 9200, "reason": "flash-loan reentrancy draining pool"}',
-        '{"price_deviation_bps": 8800, "state": "abnormal drain confirmed"}',
-        "connectivity verification incident",
+        TARGET,
+        txHash,
+        bind({ tvl_drop_bps: 9200, reason: "flash-loan reentrancy draining pool" }),
+        bind({ price_deviation_bps: 8800, state: "abnormal drain confirmed" }),
       ],
     };
 
@@ -154,7 +158,7 @@ async function main(): Promise<number> {
 
     const txId = await withTimeout(signer.writeContract(call), 45000, "writeContract");
     writeOk = true;
-    line(true, "2. send test incident (simulate_signal)", `tx=${String(txId)}`);
+    line(true, "2. send drill (simulate_signal)", `tx=${String(txId)}`);
 
     // --- 3. Race-free receipt polling ------------------------------------
     // waitUntil, not the deprecated status: the v0.6 spelling, and the only one

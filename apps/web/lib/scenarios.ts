@@ -1,6 +1,9 @@
-// Breach Simulator scenario presets. Each drives the deterministic 5s animation,
-// the consensus log, the LiveChain readout, and the parameters sent to a real
-// on-chain simulate_signal transaction (payloadA/payloadB/description).
+// Breach Simulator scenario presets. Each drives the deterministic 5s off-chain
+// animation and the consensus log, and supplies the two feed bodies for a real
+// on-chain drill (simulate_signal). The drill binds each body to the target vault
+// and a fresh tx hash, is adjudicated by validators, and never settles: the tier
+// and state fields below describe what a live submit_signal with this evidence
+// would do, not what the drill changes.
 //
 // Verdict tiers mirror contracts/stasis_guardian.py:
 //   NORMAL=0, ELEVATED_RISK=1, CRITICAL_BREACH=2, MALICIOUS_REPORT=3
@@ -20,9 +23,9 @@ export interface Scenario {
   feedBLabel: string; // label for the second feed row
   divergence: number; // final displayed divergence (%)
   reason: string;
-  description: string; // incident description sent on-chain
-  payloadA: string; // primary feed body for simulate_signal
-  payloadB: string; // secondary feed body for simulate_signal
+  description: string; // incident description shown in the consensus log
+  payloadA: string; // primary feed body for the drill
+  payloadB: string; // secondary feed body for the drill
   bountyAllocated: boolean; // reporter bounty allocated (CRITICAL_BREACH only)
   bondSlashed: boolean; // reporter bond slashed (MALICIOUS_REPORT only)
   accent: string; // outcome signal color
@@ -50,7 +53,7 @@ export const SCENARIOS: Record<ScenarioId, Scenario> = {
     bondSlashed: false,
     accent: "#FF2E54",
     actionLine: "emit_pause() -> target vault",
-    settleLine: "DISPATCH: SETTLED :: bounty 5.00 GEN",
+    settleLine: "DISPATCH: LOCKED :: bounty 5.00 GEN in challenge window",
   },
   elevated: {
     id: "elevated",

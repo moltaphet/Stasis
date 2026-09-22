@@ -10,19 +10,19 @@ const ITEMS = [
   },
   {
     q: "How does Stasis prevent false trips and griefing attacks?",
-    a: "Every report requires multi-feed validation. If primary and secondary feeds disagree or reports are spoofed, validators converge on MALICIOUS_REPORT, dismissing the claim and slashing the reporter's bond.",
+    a: "Every report carries a mandatory native GEN bond and names one transaction. Both independent feeds must reference the target vault and that transaction or the report reverts as unbound evidence. If the feeds disagree or the report is spoofed, validators converge on MALICIOUS_REPORT and the bond is slashed. Each transaction can be adjudicated once, so verdicts cannot be re-rolled.",
   },
   {
     q: "How is Prompt Injection handled?",
-    a: "User incident descriptions are treated as untrusted strings and encapsulated inside strict XML delimiters in the validation prompt. Prompts instruct validators to evaluate only verified numerical divergence from raw telemetry endpoints.",
+    a: "Reporters supply no free text. Feed bodies are sanitized, length-capped and sealed inside <untrusted_input> delimiters; the prompt instructs validators to treat that content strictly as data and any embedded instruction as evidence of a spoofed report. Model output must be a strictly typed verdict or the report reverts.",
   },
   {
     q: "How does the recovery/unpause cycle work?",
-    a: "Once TRIPPED, the vault enters an enforced on-chain cooldown. Recovery requires either an automated cooldown expiry check or admin-authorized state restoration.",
+    a: "Once TRIPPED, the vault enters an enforced on-chain cooldown. After it elapses the vault admin calls recover(), which restores the breaker and emits unpause() to the target. An overturned dispute lifts the pause immediately.",
   },
   {
     q: "How are bounties settled safely?",
-    a: "Native GEN bounty escrow uses a Pull-over-Push accounting model (claimable_balances), ensuring consensus executions never trigger external token transfers.",
+    a: "A confirmed breach locks the bounty and the reporter's bond for a challenge window. The vault admin may dispute inside the window by posting at least the reporter's full stake; a fresh validator round decides and the loser forfeits their bond. Released funds are pulled via withdraw(), so consensus execution never pushes a transfer.",
   },
 ];
 

@@ -10,7 +10,8 @@ exploit window - before catastrophic drain finalizes.
 
 - Runtime: GenLayer Intelligent Contract (`contracts/stasis_guardian.py`)
 - Consensus: multi-validator equivalence over a non-deterministic block
-- Settlement: native GEN escrow with strict pull-over-push accounting
+- Settlement: native GEN escrow, mandatory reporter bonds, a bonded dispute window,
+  and strict pull-over-push accounting
 - Frontend: Next.js operations terminal (`apps/web`)
 
 ---
@@ -51,90 +52,87 @@ on.
 
 ```
    +-------------------+
-   |  Watcher / Bot    |   submits incident (target, tx_hash, incident_id, desc)
-   |  Anomaly Report   |   optional native GEN bond attached
+   |  Watcher / Bot    |   submit_signal(target, tx_hash)   payable: bond > 0
    +---------+---------+
              |
              v
-   +-------------------------------+
-   | Deterministic Guards          |   registered? active? not already TRIPPED?
-   | Replay check (processed_...)   |   reject duplicate (target|tx_hash|incident)
-   +---------+---------------------+
+   +--------------------------------+
+   | Deterministic Guards (revert)  |   tx_hash = 0x + 64 hex?   registered? active?
+   |                                |   not TRIPPED? no unsettled bounty?
+   |                                |   bond >= max(1, min_bond)? (target, tx) unseen?
+   +---------+----------------------+
              |
              v
    +===============================================================+
-   |  NON-DETERMINISTIC BLOCK  (gl.vm.run_nondet_unsafe)            |
+   |  NON-DETERMINISTIC BLOCK  (gl.vm.run_nondet)                  |
    |                                                               |
-   |  Dual-Feed Telemetry Extraction (gl.nondet.web.get)           |
-   |    primary_feed_url  ---+                                      |
-   |    secondary_feed_url --+--> cross-reference                  |
+   |  Per-transaction evidence (gl.nondet.web.get)                 |
+   |    primary_feed_url   with {tx_hash} substituted              |
+   |    secondary_feed_url with {tx_hash} substituted              |
+   |  Target binding: BOTH bodies must name the target address     |
+   |    and the tx hash, else "unbound" (model never consulted)    |
    |                                                               |
-   |  LLM Consensus Engine (injection-hardened prompt)             |
-   |    untrusted text sealed in <untrusted_input> ... </...>      |
-   |    validators agree on a DISCRETE TIER:                       |
+   |  LLM analyst (injection-hardened, tag-isolated prompt)        |
+   |    strict typed JSON verdict -> DISCRETE TIER                 |
    |      NORMAL | ELEVATED_RISK | CRITICAL_BREACH | MALICIOUS_REPORT|
    +===============================================================+
              |
              v
-   +-------------------------------+
-   | Deterministic Settlement      |
-   |   tier -> state transition    |
-   |   CRITICAL_BREACH:            |
-   |     state = TRIPPED           |
-   |     credit claimable_balances |   (pull-over-push, no external transfer here)
-   |     emit ITargetVault.pause() |   (finalization-gated EVM hook)
-   |   MALICIOUS_REPORT:           |
-   |     slash reporter bond       |
-   +---------+---------------------+
+   +--------------------------------+
+   | Fail-closed gate (revert)      |   ERR_UNBOUND_EVIDENCE / ERR_FEED_UNAVAILABLE /
+   |                                |   ERR_FEED_REJECTED / ERR_ADJUDICATION_FAILED
+   +---------+----------------------+
              |
              v
-   +-------------------------------+       +---------------------------+
-   | Circuit State: TRIPPED        |       | Reporter pulls bounty via |
-   | (target vault paused)         |       | withdraw() (CEI + emit)   |
-   +-------------------------------+       +---------------------------+
+   +--------------------------------+
+   | Deterministic Settlement       |
+   |   CRITICAL_BREACH:             |
+   |     state = TRIPPED            |
+   |     bounty + bond LOCKED       |   challenge window = cooldown_seconds
+   |     emit ITargetVault.pause()  |   (finalization-gated message)
+   |   MALICIOUS_REPORT:            |
+   |     bond slashed to reserve    |
+   |   NORMAL / ELEVATED_RISK:      |
+   |     bond refunded (claimable)  |
+   +--------------------------------+
 ```
 
-### State machine lifecycle
+### State machines
 
 ```
-        CRITICAL_BREACH                     recover() after cooldown
-  ARMED ---------------> TRIPPED --------------------------------> RESTORED
-   ^  |                 (paused)                                     |
-   |  | ELEVATED_RISK                                                |
-   |  v                                                              |
-  RATE_LIMITED <--- NORMAL clears ----+     (RESTORED re-arms for monitoring)
+Vault:          CRITICAL_BREACH                  recover() after cooldown
+          ARMED ---------------> TRIPPED ---------------------------> RESTORED
+           ^  |                 (paused)   dispute overturned ------> RESTORED
+           |  | ELEVATED_RISK
+           |  v
+          RATE_LIMITED <--- NORMAL clears
+
+Bounty:   NONE -> PENDING --(window closes: claim_payout / recover)--> SETTLED
+                     |
+                     +--(admin dispute_trip, bond >= bounty+bond)--> DISPUTED
+                                                                        |
+                          resolve_dispute(): upheld  --> SETTLED  (reporter wins
+                                                          bounty + bond + dispute bond)
+                                             overturned -> OVERTURNED (bounty back to
+                                                          reserve, reporter bond and
+                                                          dispute bond to admin)
 ```
 
-Stored state values (`u32`): `ARMED = 0`, `TRIPPED = 1`, `RESTORED = 2`,
-`RATE_LIMITED = 3`. Monitoring is permitted in any state except `TRIPPED`, which is
-idempotent (a second signal on a tripped vault is a no-op). `recover()` is gated by
-an enforced on-chain cooldown and emits `unpause()` to the target vault on
-finalization.
+Stored values (`u32`): vault `ARMED = 0`, `TRIPPED = 1`, `RESTORED = 2`,
+`RATE_LIMITED = 3`; payout `NONE = 0`, `PENDING = 1`, `DISPUTED = 2`,
+`SETTLED = 3`, `OVERTURNED = 4`.
+
+`RATE_LIMITED` is an on-chain flag that integrators can read; the guardian itself
+only ever emits `pause()` / `unpause()` to the target.
 
 ---
 
-## 3. Integration Guide for External DeFi Protocols
+## 3. Integration Guide for DeFi Vaults
 
-Stasis governs the pause switch of a target vault. Two integration patterns are
-supported; a vault may use either.
-
-Circuit state mirror (Solidity):
-
-```solidity
-// Mirrors contracts/stasis_guardian.py state values.
-enum CircuitState { ARMED, TRIPPED, RESTORED, RATE_LIMITED }
-
-interface IStasisGuardian {
-    // Returns the CircuitState for a registered target vault.
-    function get_state(address target) external view returns (uint32);
-}
-```
-
-### Pattern A: Push Model (autonomous pause via PAUSER_ROLE)
-
-The vault grants Stasis authority to pause it. On a `CRITICAL_BREACH` verdict, the
-guardian emits an external message that calls `pause()` on the target on
-finalization. The vault only needs a standard pausable surface and a role grant.
+The guardian governs the pause switch of a target vault. On a `CRITICAL_BREACH`
+verdict it emits a finalization-gated `pause()` message to the target, and on
+`recover()` (or an overturned dispute) it emits `unpause()`. The vault must accept
+those calls **only** from the guardian:
 
 ```solidity
 // SPDX-License-Identifier: MIT
@@ -148,19 +146,11 @@ contract ProtectedVault is AccessControl, Pausable {
 
     constructor(address stasisGuardian) {
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
-        // Grant the Stasis guardian (its chain-layer address) the pauser role.
         _grantRole(PAUSER_ROLE, stasisGuardian);
     }
 
-    // Called by Stasis on CRITICAL_BREACH (finalization-gated external message).
-    function pause() external onlyRole(PAUSER_ROLE) {
-        _pause();
-    }
-
-    // Called by Stasis recover() after the cooldown elapses.
-    function unpause() external onlyRole(PAUSER_ROLE) {
-        _unpause();
-    }
+    function pause() external onlyRole(PAUSER_ROLE) { _pause(); }
+    function unpause() external onlyRole(PAUSER_ROLE) { _unpause(); }
 
     function withdraw(uint256 amount) external whenNotPaused {
         // ... critical logic is inert while paused ...
@@ -168,153 +158,152 @@ contract ProtectedVault is AccessControl, Pausable {
 }
 ```
 
-The guardian expects exactly this surface:
+`contracts/reference_vault.py` is the same contract as a GenLayer intelligent
+contract: it binds the guardian at construction and rejects `pause()` / `unpause()`
+from anyone else with `ERR_NOT_GUARDIAN`. It is the registered target on the
+reference deployment.
 
-```python
-@gl.evm.contract_interface
-class ITargetVault:
-    class View:
-        def is_paused(self) -> bool: ...
-    class Write:
-        def pause(self) -> None: ...
-        def unpause(self) -> None: ...
-```
+### Feeds
 
-### Pattern B: Pull Model (guard modifier, zero delegated admin)
-
-The vault delegates no admin authority. Instead, each critical function reads the
-Stasis circuit state and refuses to execute while `TRIPPED`. This keeps the vault
-fully self-sovereign - Stasis can never move funds, only signal.
-
-```solidity
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-
-import {IStasisGuardian, CircuitState} from "./IStasisGuardian.sol";
-
-contract SelfGuardedVault {
-    address public constant STASIS_ADDRESS = 0xE47320c6e8ad2Dd8d32ba885482Cd9dcd08861B1;
-
-    modifier onlyWhenStasisActive() {
-        require(
-            IStasisGuardian(STASIS_ADDRESS).get_state(address(this))
-                != uint32(CircuitState.TRIPPED),
-            "STASIS: circuit tripped"
-        );
-        _;
-    }
-
-    function withdraw(uint256 amount) external onlyWhenStasisActive {
-        // ... executes only while the circuit is not TRIPPED ...
-    }
-
-    function swap(uint256 amountIn) external onlyWhenStasisActive {
-        // ... same guard on any drain-capable path ...
-    }
-}
-```
-
-### Registration and escrow lifecycle
-
-All calls target the deployed `StasisGuardian` contract.
+Each vault is registered with two independent, public, keyless HTTPS endpoints.
+A `{tx_hash}` placeholder is replaced by the reported (validated) transaction hash,
+so validators fetch evidence about exactly that transaction. The reference
+deployment uses two independent block explorers:
 
 ```
-# 1. Register the vault (admin = caller).
-register_vault(
-    target_address,        # Address of the vault to protect
-    primary_feed_url,       # First independent telemetry endpoint
-    secondary_feed_url,     # Second independent telemetry endpoint
-    threshold_bps,          # TVL-drop trip threshold in basis points (e.g. 1500 = 15%)
-    bounty_amount,          # Native GEN paid to a reporter on CRITICAL_BREACH
-    cooldown_seconds,       # Enforced pause window before recovery is allowed
-    active                  # Monitoring on/off
-)
-
-# 2. Fund the bounty escrow (payable; value = native GEN).
-deposit(target_address)     # value credits vault escrow + total_deposited
-
-# 3. (Operational) Submit an incident (payable; optional reporter bond).
-submit_signal(target_address, tx_hash, incident_id, description)
-
-# 4. After cooldown, restore the vault (admin only).
-recover(target_address)     # TRIPPED -> RESTORED, emits unpause()
-
-# 5. Reporters pull earned bounties independently.
-withdraw()                  # transfers claimable_balances[caller] via CEI
+https://eth.blockscout.com/api/v2/transactions/{tx_hash}
+https://api.blockchair.com/ethereum/dashboards/transaction/{tx_hash}
 ```
+
+Registration rejects non-HTTPS URLs, URLs with embedded credentials or whitespace,
+and identical primary/secondary feeds (`ERR_INVALID_FEED`). A report is only
+adjudicated if **both** fetched bodies reference the target address and the tx hash;
+anything else - telemetry about another vault or transaction, generic metadata -
+reverts with `ERR_UNBOUND_EVIDENCE` before the model is consulted.
+
+### Lifecycle calls
+
+```
+# Registry (owner = deployer; curated so no one can squat a target and pick its feeds)
+register_vault(target, primary_feed_url, secondary_feed_url,
+               threshold_bps,       # 1..10000
+               bounty_amount,       # native GEN paid on a confirmed breach
+               cooldown_seconds,    # pause window AND bounty challenge window
+               active)
+transfer_vault_admin(target, new_admin)   # hand the vault to its operator
+transfer_ownership(new_owner)
+
+# Escrow
+deposit(target)                  # payable, value > 0
+set_min_bond(target, min_bond)   # admin; raises the reporter bond floor
+
+# Reports
+submit_signal(target, tx_hash)   # payable, bond > 0 and >= min_bond
+
+# Bounty lifecycle
+claim_payout(target)             # after the window, releases bounty+bond to reporter
+dispute_trip(target)             # admin, payable, inside the window, bond >= bounty+bond
+resolve_dispute(target)          # anyone; fresh validator round over the same tx
+recover(target)                  # admin, after cooldown; settles an undisputed bounty
+withdraw()                       # pull claimable balance (CEI + emit_transfer)
+
+# Drill (non-settling)
+simulate_signal(target, tx_hash, primary_body, secondary_body)
+```
+
+Every rejection reverts with a classified, stable code, e.g.
+`[EXPECTED] ERR_PAYOUT_LOCKED: bounty is under dispute`. Codes: `ERR_NOT_OWNER`,
+`ERR_NOT_ADMIN`, `ERR_ZERO_ADDRESS`, `ERR_VAULT_EXISTS`, `ERR_VAULT_NOT_REGISTERED`,
+`ERR_INVALID_FEED`, `ERR_INVALID_PARAM`, `ERR_ZERO_VALUE`, `ERR_ZERO_BOND`,
+`ERR_BOND_BELOW_MIN`, `ERR_VAULT_INACTIVE`, `ERR_VAULT_TRIPPED`,
+`ERR_MALFORMED_EVIDENCE`, `ERR_UNBOUND_EVIDENCE`, `ERR_DUPLICATE_INCIDENT`,
+`ERR_FEED_UNAVAILABLE`, `ERR_FEED_REJECTED`, `ERR_ADJUDICATION_FAILED`,
+`ERR_NOTHING_TO_WITHDRAW`, `ERR_NO_PAYOUT`, `ERR_PAYOUT_LOCKED`,
+`ERR_DISPUTE_WINDOW_CLOSED`, `ERR_DISPUTE_BOND_TOO_LOW`, `ERR_NOT_DISPUTED`,
+`ERR_NOT_TRIPPED`, `ERR_COOLDOWN_ACTIVE`, `ERR_NO_DRILL`.
 
 ---
 
-## 4. Security Pillars and Invariants
+## 4. Security Model and Invariants
+
+### Fail closed
+
+Nothing is inferred or defaulted. Malformed evidence, unbound evidence, a feed that
+answers anything but 2xx, and a model answer that is not a strictly typed verdict
+(`is_malicious` / `is_false_report` must be JSON booleans, `observed_drop_bps` a
+non-negative number) all revert. A revert returns the attached bond untouched, does
+not burn the replay key, and changes no state, so the report can be retried once the
+feeds heal.
+
+### Target binding
+
+The report is `(target, tx_hash)`. `tx_hash` must be `0x` plus 64 hex digits and is
+lower-cased before use, so it is safe to substitute into a feed URL. Each feed body
+must contain both the target address and the tx hash; a validator whose own fetch is
+unbound disagrees with a leader that claims otherwise. The prompt names the vault and
+the transaction and instructs the analyst to ignore activity attributable to any
+other address or transaction.
 
 ### Anti-prompt-injection
 
-User-supplied incident descriptions and raw feed bodies are untrusted. They are
-sanitized and encapsulated inside explicit XML boundary tags
-(`<untrusted_input> ... </untrusted_input>`); embedded copies of the tags are
-stripped case-insensitively, and control characters and non-ASCII bytes are
-neutralized before the text reaches the prompt (each feed body is also length
-capped) so a feed cannot break out of its sandbox or smuggle hidden directives. The
-system prompt instructs validators to treat everything inside the tags strictly as
-data, to ignore any instruction found there, and to decide only on verified
-numerical divergence from the raw telemetry endpoints. Any instruction-like content
-inside the tags is itself treated as evidence of a spoofed report.
+Feed bodies are untrusted. They are sanitized (non-ASCII dropped, control characters
+neutralized, isolation tags stripped case-insensitively, length capped) and sealed
+inside `<untrusted_input> ... </untrusted_input>`. The prompt tells validators to
+treat that content strictly as data and to treat any embedded instruction as evidence
+of a spoofed report. Reporters supply no free text at all.
 
-### Multi-feed redundancy
+### Multi-feed corroboration and consensus stability
 
-Two independent endpoints are fetched and cross-referenced in the same
-non-deterministic block. If the primary and secondary feeds do not corroborate - a
-catastrophic drain on one but nominal state on the other - validators converge on
-`MALICIOUS_REPORT`, the claim is dismissed, and any attached reporter bond is
-slashed into the vault reserve. A single noisy or spoofed feed cannot trip a healthy
-vault.
+Two independent endpoints are cross-referenced in the same non-deterministic block. A
+catastrophic drain on one feed with nominal state on the other resolves to
+`MALICIOUS_REPORT`, and the reporter's bond is slashed. Verdicts are coarse discrete
+tiers; drop magnitudes are quantized to 100 bps bands before the threshold
+comparison, so sub-band model jitter cannot split validators. Validators agree on the
+bucket, never on raw model text.
 
-### Consensus stability
+### Economic security
 
-Verdicts are coarse-bucketed to discrete tiers, never a continuous score, so
-subtle RPC variance between validators cannot break consensus. Feed faults are
-classified: `[TRANSIENT]` (429 / 5xx / timeout) degrades to a retryable no-op and
-never trips; `[EXTERNAL]` (4xx) is deterministic; malformed LLM output falls back
-benignly instead of panicking. Validators agree on the tier bucket, never on raw
-model text.
+- **No free reports.** Every `submit_signal` carries a non-zero bond
+  (`ERR_ZERO_BOND`), and the admin can raise the floor with `set_min_bond`.
+- **No re-rolls.** Replay is keyed on `digest(target | tx_hash)`, so a reporter cannot
+  re-submit the same transaction under a new label to draw a different verdict.
+- **No instant payouts.** A confirmed breach locks bounty and bond for the challenge
+  window. They cannot be claimed or withdrawn while pending or disputed
+  (`ERR_PAYOUT_LOCKED`), and a new report cannot overwrite an unsettled bounty.
+- **Bonded disputes.** Only the vault admin can dispute, only inside the window, and
+  only by posting at least the reporter's full stake (`ERR_DISPUTE_BOND_TOO_LOW`).
+  The loser forfeits their bond to the winner. If validators cannot resolve a dispute
+  within seven days, the original verdict stands, so escrow is never locked forever.
+- **Self-dealing is net zero.** An admin who reports their own vault and then
+  disputes the report recovers only their own two bonds; the bounty returns to the
+  reserve.
+- **Drills cannot settle.** `simulate_signal` is not payable and never touches vault
+  state, escrow, bonds, payouts, replay keys or the target. It stores only the last
+  drill verdict (`get_last_drill_tier`).
+- **Curated registry.** Only the registry owner can register a target, so no one can
+  claim a vault before its operator and point it at feeds they control.
 
-### Pull-over-push accounting
+### Pull-over-push accounting and solvency
 
-Consensus execution never triggers an external native transfer. A `CRITICAL_BREACH`
-only credits `claimable_balances[reporter]`. Beneficiaries pull funds through a
-standalone `withdraw()` that follows checks-effects-interactions: it zeroes the
-claim and decrements accounting before the external `emit_transfer`. Solvency is
-tracked with separated fields and the invariant is asserted in tests:
+Consensus execution never triggers an external native transfer. Beneficiaries pull
+funds through `withdraw()`, which zeroes the claim and decrements accounting before
+`emit_transfer`. The invariant
 
 ```
 total_deposited == sum(vault escrow balances) + locked_escrow
 ```
 
-`locked_escrow` is incremented in lockstep with every credit to
-`claimable_balances` and decremented on `withdraw()`, so by construction
-`locked_escrow == sum(claimable_balances)`. The invariant above therefore already
-accounts for all reporter claims; adding `sum(claimable_balances)` as a separate
-term would double-count.
-
-An optional per-vault reporter-bond floor (`min_bond`, set by the admin via
-`set_min_bond()`) can require every `submit_signal()` to attach at least a minimum
-native GEN bond. A `MALICIOUS_REPORT` verdict slashes the posted bond into the vault
-reserve; `NORMAL` / `ELEVATED_RISK` outcomes refund it. `incident_id` and `tx_hash`
-are ASCII strings (they are folded into the replay digest as strings).
-
-### Replay defense
-
-Every incident is keyed by a deterministic 256-bit content digest of
-`(target_address, tx_hash, incident_id)` recorded in a `processed_incidents`
-`TreeMap[u256, bool]`. A previously adjudicated incident is rejected before any
-non-deterministic work runs, so stale attacks cannot be replayed to grief a vault or
-double-claim a bounty.
+holds after every transition, where `locked_escrow` covers claimable balances,
+pending and disputed bounties, reporter bonds and dispute bonds. The direct suite
+asserts it across trips, slashes, refunds, claims, and both dispute outcomes.
 
 ### Non-deterministic isolation
 
 No contract storage is read or written inside the `leader_fn` / `validator_fn`
-closures. All values the closures need are copied into plain memory first; all state
-transitions happen deterministically after consensus resolves.
+closures. All values they need are copied into plain memory first, every
+`gl.nondet.*` call sits lexically inside the block passed to `gl.vm.run_nondet`, and
+all state transitions happen deterministically after consensus resolves. The only
+time source is the transaction timestamp.
 
 ---
 
@@ -327,9 +316,7 @@ pip install -r requirements-dev.txt   # genlayer-py, genlayer-test, genvm-linter
 ```
 
 The GenLayer components are one release-candidate set and move together, so
-`requirements-dev.txt` pins each exactly rather than ranging over it. A linter built
-for a different VM than the one running the contract surfaces as a load failure
-("Failed to load contract") rather than as a version mismatch.
+`requirements-dev.txt` pins each exactly rather than ranging over it.
 
 ### Direct-mode tests (fast, in-memory, no Docker)
 
@@ -337,27 +324,21 @@ for a different VM than the one running the contract surfaces as a load failure
 pytest tests/direct/ -v
 ```
 
-42 tests run in well under a minute against the in-memory GenVM. They cover the
-full lifecycle (deposit -> signal -> trip -> withdraw bounty -> recover), replay
-rejection, multi-feed discrepancy, transient/LLM fault tolerance, reporter bond
-refund/slash, and the solvency invariant.
+99 tests against the in-memory GenVM, with web and LLM calls replaced by test
+doubles. They cover registration and feed validation, evidence format and target
+binding, strict verdict parsing, every fail-closed revert, bond refund and slash,
+the challenge window, both dispute outcomes and the deadline fallback, the drill's
+non-settlement, replay and re-roll rejection, validator agreement, the reference
+vault's guardian-only pause, and the solvency invariant.
 
 ### Linter
 
 ```bash
-genvm-lint lint contracts/stasis_guardian.py
-genvm-lint lint contracts/mock_vault.py
-genvm-lint validate contracts/mock_vault.py
+genvm-lint lint contracts/stasis_guardian.py && genvm-lint validate contracts/stasis_guardian.py
+genvm-lint lint contracts/reference_vault.py && genvm-lint validate contracts/reference_vault.py
 ```
 
-`genvm-lint validate` is run on the mock vault only. Its validator sets
-`GENERATING_DOCS=true`, which makes the SDK read a `return` annotation off a
-generated wrapper that carries none (`KeyError: 'return'`) for any
-`@gl.evm.contract_interface` that declares a method in its `View` class. The
-guardian's `ITargetVault.View.is_paused` is required by the vault interface spec, so
-the interface stays and the guardian is validated by deploying it and running the
-integration suite instead. This is a linter gap, not a contract defect: the same
-contract runs green under direct mode and on live GenVM.
+Both contracts pass `lint` and `validate` with no warnings.
 
 ### Integration tests (full consensus, requires a live GenLayer environment)
 
@@ -366,8 +347,9 @@ gltest tests/integration/ -v -s --network localnet        # against a local `gen
 gltest tests/integration/ -v -s --network studio_devnet   # the v0.6 preview, fee-charging
 ```
 
-See `tests/integration/README.md` for environment notes. The deterministic pipeline
-runs without an LLM; adjudication tests that require a real verdict are gated behind
+See `tests/integration/README.md`. The deterministic pipeline, including a live
+fetch of both public explorers that must reject evidence about another address,
+runs without an LLM; tests that need a real verdict are gated behind
 `STASIS_INTEGRATION_LLM=1`.
 
 Use `studio_devnet`, not `studionet`, to validate a v0.6 build. The chain object
@@ -401,7 +383,7 @@ the refund at finalization, so profiling off one measures every method as free.
 ```bash
 cd apps/web
 npm install
-cp .env.local.example .env.local   # set NEXT_PUBLIC_GUARDIAN_ADDRESS + chain
+cp .env.local.example .env.local   # guardian + target vault addresses, chain
 npm run dev                        # http://localhost:3000
 npm run build                      # production build, 0 errors
 ```
@@ -412,7 +394,7 @@ npm run build                      # production build, 0 errors
 NODE_PATH="$(pwd)/apps/web/node_modules" npx tsx scripts/verify_frontend_connection.ts
 ```
 
-Reads the exact frontend config and runs read -> write -> receipt-poll against the
+Reads the exact frontend config and runs read -> drill -> receipt-poll against the
 configured chain, using the same `genlayer-js` client the browser uses. It asserts
 success the way the app does - a terminal-good *status* **and** a
 `FINISHED_WITH_RETURN` *execution result* - and prints the fee deposit, the consumed
@@ -423,44 +405,46 @@ part and the refund as three separate numbers.
 ## 6. Deployment and Addresses
 
 Consensus **v0.6** (Studio **v0.123** RC) on the **Studio Devnet preview**. The
-authoritative record is `deployments/studio-dev.json`, written by `make deploy`.
+authoritative record is `deployments/studio-dev.json`, written by the deploy step:
 
-| Field                 | Value                                          |
-| --------------------- | ---------------------------------------------- |
-| Network               | GenLayer Studio Devnet (preview, fee-charging) |
-| Chain ID              | `61997`                                        |
-| RPC endpoint          | `https://studio-dev.genlayer.com/api`          |
-| Explorer              | `https://explorer-studio-dev.genlayer.com`     |
-| Stasis Guardian       | `0xE47320c6e8ad2Dd8d32ba885482Cd9dcd08861B1`   |
-| Mock target vault     | `0xdC752A89b75ce197c982008D2fbe9Eb46fB12671`   |
+```bash
+STASIS_DEPLOY=1 STASIS_DEPLOYER_KEY_FILE=<path to owner key> NO_PROXY="*" \
+  gltest tests/integration/test_deploy_studio_dev.py -v -s --network studio_devnet
+```
 
-Unlike stable StudioNet, Studio Devnet charges fees: writes must carry a fee
-distribution (see the fee profile above). Studio Devnet is a preview network and may
-be reset, so durable production-like testing belongs on Bradbury, once the compatible
-v0.6 stack is promoted there.
+The deployer becomes the registry owner and the reference vault's admin, so the
+deploy step refuses to run without a key file that is kept.
 
-Note on read availability: at time of writing, hosted Studio's `gen_call` read path
-intermittently returns "Contract not found" for finalized contracts (an issue
-reproduced across the CLI, gltest, and genlayer-js). Writes finalize normally. The
-dashboard handles this by degrading to receipt-derived optimistic state with a
-`Read Sync` status badge rather than a fatal error, and by driving live state from
-finalized `simulate_signal` receipts.
+| Field                   | Value                                          |
+| ----------------------- | ---------------------------------------------- |
+| Network                 | GenLayer Studio Devnet (preview, fee-charging) |
+| Chain ID                | `61997`                                        |
+| RPC endpoint            | `https://studio-dev.genlayer.com/api`          |
+| Explorer                | `https://explorer-studio-dev.genlayer.com`     |
+| Stasis Guardian         | `0xC044B8cD496f88903f14e7B330cF3E35a1a8dD56`   |
+| Reference target vault  | `0x669379b85679874e00Aff56258109e3076B9E77F`   |
+| Registry owner          | `0x0f4F188E5815562b14AF3Af87f6EbA2f9B68E981`   |
 
-### Ephemeral Reviewer Mode (zero-friction evaluation)
+Studio Devnet charges fees: writes must carry a fee distribution (see the fee profile
+above). It is a preview network and may be reset; durable testing belongs on
+Bradbury once the compatible v0.6 stack is promoted there.
+
+### Ephemeral Reviewer Mode
 
 The dashboard exposes a one-click **Reviewer Mode** that generates an ephemeral
 in-browser account with `genlayer-js` `createAccount()`. No wallet install, seed
-phrase, or funding is required to exercise the contract.
+phrase, or funding is required.
 
 1. Open the dashboard (`apps/web`).
 2. Click **1-Click Reviewer Mode** in the Guardian Access panel.
-3. Click **Simulate Exploit Attack**. With Reviewer Mode active this broadcasts a
-   real `simulate_signal` transaction to Studio Devnet in addition to the
-   deterministic preview.
-4. The transaction is polled to a **finalized** receipt. The circuit state flips to
-   `TRIPPED`, the verdict tier (`CRITICAL_BREACH`) is surfaced, and the Live Chain
-   Readout shows the real finalized transaction hash with an explorer link.
-5. Click **Reset System** to restore both panels to `ARMED` / `0.0%` / `0.00 GEN`.
+3. Pick a scenario and click **Execute Scenario**. The panel plays an off-chain
+   preview of what a live report with that evidence does, and - with Reviewer Mode
+   active - broadcasts a real drill (`simulate_signal`) to Studio Devnet with both
+   feed bodies bound to the reference vault and a fresh tx hash.
+4. The drill is polled to a **finalized** receipt. Its verdict is read from the
+   receipt (or from `get_last_drill_tier`) and shown with the transaction hash and an
+   explorer link. The drill does not settle, so the Live Chain Readout - which shows
+   only values read from the chain - keeps showing the vault's real state.
 
 Strict EIP-6963 provider selection (`rdns === "io.metamask"`) is used for optional
 browser-wallet connection so a Phantom-injected provider cannot hijack MetaMask Snap
@@ -490,16 +474,6 @@ Three v0.6 behaviours are load-bearing here and are easy to regress:
   deploy step both pass `wait_until="finalized"` explicitly - otherwise the profile's
   `deploy` entry reads as free.
 
-One item in the migration guide does not apply here, and it is worth saying why
-rather than leaving it looking skipped:
-
-- **`submitAppeal` -> `appealTransaction`.** The guide replaces direct public
-  `submitAppeal` calls with the SDK's `appealTransaction` / `appeal_transaction`
-  helper. Nothing in this repo appeals a transaction - the grep is empty - because
-  the guardian settles each incident in one round and has no appeal entry point. If
-  an appeal path is ever added, it must go through the SDK helper; the guide reserves
-  the direct call for explicit low-level conformance against an already-funded round.
-
 ---
 
 ## Repository Layout
@@ -507,18 +481,18 @@ rather than leaving it looking skipped:
 ```
 contracts/
   stasis_guardian.py     # The Stasis Guardian intelligent contract
-  mock_vault.py          # Direct-mode stand-in for an EVM target vault
+  reference_vault.py     # Guardian-only pausable target vault
 tests/
   direct/                # In-memory direct-mode tests (no Docker)
-  integration/           # Full-consensus tests against a live environment
+  integration/           # Full-consensus tests + the deploy step
 apps/web/                # Next.js operations terminal / dashboard
   lib/fees.ts            # Measured-profile -> SDK fee estimate
-  lib/genlayer.ts        # Isolated genlayer-js integration (receipts, fees, verdicts)
+  lib/genlayer.ts        # Isolated genlayer-js integration (reads, drills, receipts)
 scripts/
-  verify_frontend_connection.ts   # read -> write -> poll connectivity check
+  verify_frontend_connection.ts   # read -> drill -> poll connectivity check
   ascii_scan.sh                    # pure-ASCII gate
 deployments/
-  studio-dev.json        # What is deployed where (written by `make deploy`)
+  studio-dev.json        # What is deployed where (written by the deploy step)
 fee-profile.json         # Measured per-method fee profile (written by `make profile`)
 specs/                   # Specification, data model, and hardening plan
 ```

@@ -22,6 +22,7 @@ done
 EXCLUDE_DIRS_REGEX='/(node_modules|\.next|dist|build|__pycache__|\.git|\.cache)/'
 
 fail=0
+HIGH_BYTES="$(printf '[\200-\377]')"
 found_file=""
 
 while IFS= read -r file; do
@@ -29,10 +30,21 @@ while IFS= read -r file; do
   if printf '%s' "/$file" | grep -Eq "$EXCLUDE_DIRS_REGEX"; then
     continue
   fi
-  # Detect any non-ASCII byte.
-  if LC_ALL=C grep -qP '[^\x00-\x7F]' "$file" 2>/dev/null; then
+  # Detect any non-ASCII byte. The bracket expression is built from raw high bytes
+  # so it works with BSD and GNU grep alike (BSD grep has no -P). grep exits 1 for
+  # "no match"; anything else is a scan error and fails the gate rather than
+  # passing silently.
+  set +e
+  LC_ALL=C grep -q "$HIGH_BYTES" "$file"
+  rc=$?
+  set -e
+  if [ "$rc" -eq 0 ]; then
     echo "NON-ASCII: $file"
-    LC_ALL=C grep -nP '[^\x00-\x7F]' "$file" | head -5
+    LC_ALL=C grep -n "$HIGH_BYTES" "$file" | head -5
+    fail=1
+    found_file="$file"
+  elif [ "$rc" -ne 1 ]; then
+    echo "SCAN ERROR ($rc): $file"
     fail=1
     found_file="$file"
   fi

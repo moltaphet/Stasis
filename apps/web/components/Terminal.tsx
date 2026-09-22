@@ -14,8 +14,8 @@ import {
   Siren,
   Zap,
 } from "lucide-react";
-import { GUARDIAN_ADDRESS, MOCK_VAULT_ADDRESS } from "@/lib/config";
-import { submitIncident, type FeeAccounting, type ReviewerSession } from "@/lib/genlayer";
+import { GUARDIAN_ADDRESS, TARGET_VAULT_ADDRESS } from "@/lib/config";
+import { runDrill, type FeeAccounting, type ReviewerSession } from "@/lib/genlayer";
 import { SCENARIOS, SCENARIO_ORDER, type Scenario, type ScenarioId } from "@/lib/scenarios";
 import { useWallet } from "@/components/WalletProvider";
 import LiveChain from "./LiveChain";
@@ -114,7 +114,7 @@ function buildSchedule(sc: Scenario): { at: number; tone: Tone; text: string }[]
     lines.splice(5, 0, {
       at: 3300,
       tone: "orange",
-      text: "injection.guard :: description sealed in <untrusted_input>",
+      text: "injection.guard :: feed body sealed in <untrusted_input>",
     });
   }
   return lines;
@@ -189,7 +189,7 @@ export default function Terminal() {
     txId?: string;
     status?: string;
     executionResult?: string;
-    tier?: number;
+    tier?: number | null;
     tierLabel?: string;
     fees?: FeeAccounting;
     error?: string;
@@ -217,11 +217,9 @@ export default function Terminal() {
   const broadcast = useCallback(async (s: ReviewerSession, scenario: Scenario) => {
     setTx({ state: "submitting" });
     try {
-      const res = await submitIncident(s, MOCK_VAULT_ADDRESS, {
+      const res = await runDrill(s, TARGET_VAULT_ADDRESS, {
         payloadA: scenario.payloadA,
         payloadB: scenario.payloadB,
-        description: scenario.description,
-        expectedTier: scenario.tier,
       });
       setTx({
         state: res.ok ? "done" : "error",
@@ -471,18 +469,18 @@ export default function Terminal() {
             <div className="pt-1">
               {tx.state === "idle" && (
                 <p className="label text-zinc-600">
-                  {session ? "Reviewer active - execute also broadcasts simulate_signal on-chain" : "Off-chain preview - activate Reviewer Mode to broadcast on-chain"}
+                  {session ? "Reviewer active - execute also broadcasts a non-settling on-chain drill (simulate_signal)" : "Off-chain preview - activate Reviewer Mode to broadcast an on-chain drill"}
                 </p>
               )}
               {tx.state === "submitting" && (
                 <p className="label flex items-center gap-2 text-cyan">
-                  <span className="h-2 w-2 animate-ping rounded-full bg-cyan" /> Broadcasting simulate_signal...
+                  <span className="h-2 w-2 animate-ping rounded-full bg-cyan" /> Broadcasting drill (simulate_signal)...
                 </p>
               )}
               {tx.state === "done" && (
                 <div className="space-y-1">
                   <p className="label tnum font-mono text-mint">
-                    tx {tx.txId?.slice(0, 10)}... {tx.status} :: {tx.executionResult} :: {tx.tierLabel}
+                    tx {tx.txId?.slice(0, 10)}... {tx.status} :: {tx.executionResult} :: drill verdict {tx.tierLabel}
                   </p>
                   {tx.fees?.known && (
                     // Consensus v0.6 escrows one deposit per transaction and refunds
@@ -511,7 +509,7 @@ export default function Terminal() {
                   {tx.fees?.known && (
                     <p className="label tnum font-mono text-zinc-500">
                       deposited <span className="text-zinc-300">{formatGen(tx.fees.deposit)}</span>{" "}
-                      · consumed <span className="text-amber-400">{formatGen(tx.fees.consumed)}</span> · refunded{" "}
+                      | consumed <span className="text-amber-400">{formatGen(tx.fees.consumed)}</span> | refunded{" "}
                       <span className="text-mint">{formatGen(tx.fees.refunded)}</span>
                     </p>
                   )}
@@ -564,17 +562,11 @@ export default function Terminal() {
         <GuardianCard />
       </div>
 
-      {/* Live on-chain readout - bound to the same simulator state */}
+      {/* Live on-chain readout - values read from the chain only */}
       <LiveChain
-        stateLabel={vaultStateLabel}
-        stateTone={stateTone(vaultStateLabel)}
-        verdictLabel={settled ? sc.tierLabel : "-"}
-        verdictTone={settled ? sc.accent : "#a1a1aa"}
-        divergence={divergenceLive}
-        lockedBountyGen={lockedBounty}
         confirmed={
           tx.state === "done" && tx.txId
-            ? { txId: tx.txId, status: tx.status ?? "FINALIZED", tier: tx.tier ?? sc.tier, tierLabel: tx.tierLabel ?? sc.tierLabel }
+            ? { txId: tx.txId, status: tx.status ?? "FINALIZED", tier: tx.tier ?? null, tierLabel: tx.tierLabel ?? "UNREADABLE" }
             : null
         }
       />
@@ -700,11 +692,12 @@ const SPECS: { k: string; v: string; tone?: string }[] = [
   { k: "Verdict Tiers", v: "NORMAL / ELEVATED_RISK / CRITICAL_BREACH / MALICIOUS_REPORT" },
   { k: "Trip Threshold", v: "15.0% TVL divergence", tone: "#F59E0B" },
   { k: "Ground Truth", v: "dual independent feeds (gl.nondet.web.get)" },
-  { k: "Consensus", v: "multi-LLM equivalence (run_nondet_unsafe)" },
+  { k: "Consensus", v: "multi-LLM equivalence (gl.vm.run_nondet)" },
   { k: "Injection Guard", v: "untrusted input sealed in <untrusted_input> tags" },
-  { k: "Replay Protection", v: "fnv1a-256(vault|tx|incident) TreeMap" },
-  { k: "Settlement", v: "pull-over-push claimable_balances", tone: "#00FFA3" },
-  { k: "Recovery", v: "enforced cooldown -> admin / expiry restore" },
+  { k: "Evidence Binding", v: "both feeds must name target + tx_hash" },
+  { k: "Replay Protection", v: "fnv1a-256(vault|tx) TreeMap" },
+  { k: "Settlement", v: "bonded challenge window -> pull-over-push", tone: "#00FFA3" },
+  { k: "Recovery", v: "enforced cooldown -> admin recover()" },
 ];
 
 function ProtocolSpecs() {

@@ -2,67 +2,68 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { ExternalLink, RefreshCw, Signal } from "lucide-react";
-import { CHAIN_NAME, EXPLORER_URL, GUARDIAN_ADDRESS, MOCK_VAULT_ADDRESS } from "@/lib/config";
-import { fetchReadout } from "@/lib/genlayer";
+import { CHAIN_NAME, EXPLORER_URL, GUARDIAN_ADDRESS, STATE_LABELS, TARGET_VAULT_ADDRESS, TIER_LABELS } from "@/lib/config";
+import { fetchReadout, type VaultReadout } from "@/lib/genlayer";
 
 export interface Confirmed {
   txId: string;
   status: string;
-  tier: number;
+  tier: number | null;
   tierLabel: string;
 }
 
-type Sync = "polling" | "live" | "optimistic";
+type Sync = "polling" | "live" | "unavailable";
 
 // Studio Devnet is a preview the stable Studio explorer does not index, so the
 // explorer is configured explicitly rather than read off the chain object.
 const EXPLORER = EXPLORER_URL;
 
-// Live on-chain readout. Its rows are bound to the SAME simulator state hook that
-// drives the top Breach Simulator (values passed down from Terminal), so both
-// panels flip together across every scenario preset. A real finalized
-// simulate_signal receipt is overlaid on top (tx hash + verdict). When the read
-// path is unavailable, this never shows a blocking fatal error - it shows a
-// subtle sync badge and the optimistic (simulator-derived) state.
-export default function LiveChain({
-  stateLabel,
-  stateTone,
-  verdictLabel,
-  verdictTone,
-  divergence,
-  lockedBountyGen,
-  confirmed,
-}: {
-  stateLabel: string;
-  stateTone: string;
-  verdictLabel: string;
-  verdictTone: string;
-  divergence: number;
-  lockedBountyGen: number;
-  confirmed: Confirmed | null;
-}) {
+const PAYOUT_LABELS: Record<number, string> = {
+  0: "NONE",
+  1: "PENDING",
+  2: "DISPUTED",
+  3: "SETTLED",
+  4: "OVERTURNED",
+};
+
+// Live on-chain readout of the guardian and the registered reference vault. Every
+// value shown here was read from the chain; when the read path fails the rows
+// read "-" and the badge says so. The off-chain scenario animation above never
+// feeds these rows. A finalized drill receipt is overlaid with its verdict.
+export default function LiveChain({ confirmed }: { confirmed: Confirmed | null }) {
   const [sync, setSync] = useState<Sync>("polling");
+  const [data, setData] = useState<VaultReadout | null>(null);
 
   const load = useCallback(async () => {
     setSync("polling");
     try {
-      await fetchReadout(MOCK_VAULT_ADDRESS);
+      setData(await fetchReadout(TARGET_VAULT_ADDRESS));
       setSync("live");
     } catch {
-      setSync("optimistic");
+      setData(null);
+      setSync("unavailable");
     }
   }, []);
 
   useEffect(() => {
     void load();
-  }, [load]);
+  }, [load, confirmed?.txId]);
 
   const badge =
     sync === "polling"
       ? { dot: "#00E5FF", text: "Read Sync: Polling" }
       : sync === "live"
         ? { dot: "#00FFA3", text: "Read Sync: Live" }
-        : { dot: "#F59E0B", text: "Read Sync: Optimistic State" };
+        : { dot: "#F59E0B", text: "Read Sync: Unavailable" };
+
+  const live = sync === "live" && data !== null;
+  const registered = live && data.registered;
+  const stateLabel = registered && data.state !== null ? STATE_LABELS[data.state] ?? "UNKNOWN" : "-";
+  const tierLabel = registered && data.tier !== null ? TIER_LABELS[data.tier] ?? "UNKNOWN" : "-";
+  const payoutLabel =
+    registered && data.payoutStatus !== null ? PAYOUT_LABELS[data.payoutStatus] ?? "UNKNOWN" : "-";
+  const escrowLabel = registered && data.vaultEscrow !== null ? `${formatWei(data.vaultEscrow)} GEN` : "-";
+  const lockedLabel = live ? `${formatWei(data.lockedEscrow)} GEN` : "-";
 
   return (
     <section className="glass mt-5 overflow-hidden rounded-2xl">
@@ -87,16 +88,17 @@ export default function LiveChain({
       </div>
 
       <div className="p-4">
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          <Metric label="Vault State" value={stateLabel} tone={stateTone} />
-          <Metric label="Verdict Tier" value={verdictLabel} tone={verdictTone} />
-          <Metric label="Feed Divergence" value={`${divergence.toFixed(1)}%`} tone={verdictLabel === "-" ? undefined : verdictTone} />
-          <Metric label="Locked Bounty" value={`${lockedBountyGen.toFixed(2)} GEN`} tone={lockedBountyGen > 0 ? "#FF2E54" : undefined} />
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+          <Metric label="Vault State" value={stateLabel} />
+          <Metric label="Last Verdict" value={tierLabel} />
+          <Metric label="Bounty Payout" value={payoutLabel} />
+          <Metric label="Vault Escrow" value={escrowLabel} />
+          <Metric label="Locked Escrow" value={lockedLabel} />
         </div>
 
         {confirmed && (
           <div className="tnum mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-mint/25 bg-mint/5 px-3 py-2 font-mono text-xs">
-            <span className="text-mint">receipt {confirmed.status}</span>
+            <span className="text-mint">drill receipt {confirmed.status}</span>
             <a
               href={`${EXPLORER}/tx/${confirmed.txId}`}
               target="_blank"
@@ -106,25 +108,33 @@ export default function LiveChain({
               tx {confirmed.txId.slice(0, 12)}...{confirmed.txId.slice(-6)}
               <ExternalLink className="h-3 w-3" />
             </a>
-            <span className="text-zinc-500">verdict {confirmed.tierLabel}</span>
+            <span className="text-zinc-500">drill verdict {confirmed.tierLabel} (non-settling)</span>
           </div>
         )}
 
         <p className="label mt-3 text-zinc-600">
           {sync === "live"
-            ? `guardian ${GUARDIAN_ADDRESS.slice(0, 10)}... - values fetched live from RPC`
-            : `gen_call read path unavailable on ${CHAIN_NAME} - rows mirror the simulator + finalized receipts`}
+            ? registered
+              ? `guardian ${GUARDIAN_ADDRESS.slice(0, 10)}... - values fetched live from RPC`
+              : `target vault is not registered on guardian ${GUARDIAN_ADDRESS.slice(0, 10)}...`
+            : sync === "unavailable"
+              ? `read path unavailable on ${CHAIN_NAME} - no values shown`
+              : "reading..."}
         </p>
       </div>
     </section>
   );
 }
 
-function Metric({ label, value, tone }: { label: string; value: string; tone?: string }) {
+function formatWei(wei: number): string {
+  return (wei / 1e18).toFixed(4);
+}
+
+function Metric({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-xl border border-white/10 bg-white/[0.02] p-4">
       <div className="label text-zinc-500">{label}</div>
-      <div className="tnum mt-2 font-mono text-lg font-bold" style={{ color: tone ?? "#ffffff" }}>{value}</div>
+      <div className="tnum mt-2 font-mono text-lg font-bold" style={{ color: "#ffffff" }}>{value}</div>
     </div>
   );
 }

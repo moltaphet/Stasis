@@ -1,60 +1,43 @@
-# Contract Interface: EVM Target Vault
+# Contract Interface: Target Vault
 
-Defines the outbound EVM interface the guardian uses to halt a target vault, and the
-direct-mode stand-in that verifies the invocation. Satisfies constitution Principle
-IV (EVM Emergency Dispatch).
+Defines the outbound interface the guardian uses to halt and restore a target vault,
+and the reference implementation registered on the reference deployment.
 
-## Production EVM interface (in stasis_guardian.py)
-
-Declared with `@gl.evm.contract_interface`. The guardian holds only the interface
-shape; the concrete vault lives on the EVM side.
+## Interface (declared in contracts/stasis_guardian.py)
 
 ```
 @gl.evm.contract_interface
-class TargetVault:
+class ITargetVault:
     class View:
-        def is_paused(self) -> bool: ...
+        pass
     class Write:
         def pause(self) -> None: ...
+        def unpause(self) -> None: ...
 ```
 
+The guardian never reads the target, so the View class declares nothing. (A View
+method would also trip a genvm-lint `validate` defect; keeping it empty lets both
+contracts pass `lint` and `validate`.)
+
 Dispatch semantics:
-- Halt is dispatched with `TargetVault(target_address).emit().pause()`.
-- This is an external message; it executes on transaction finalization only. It MUST
-  NOT be emitted on acceptance.
-- The guardian sets the vault to PAUSED in the same deterministic transaction that
-  emits the pause message.
+- `ITargetVault(target).emit().pause()` is sent in the same deterministic
+  transaction that sets the vault to `TRIPPED` on a `CRITICAL_BREACH` verdict.
+- `ITargetVault(target).emit().unpause()` is sent by `recover()` after the cooldown,
+  and by `resolve_dispute()` when a dispute overturns the trip.
+- Both are external messages that execute on transaction finalization only.
 
-Maps to: FR-012, FR-013; constitution Principle IV.
+## Required authorization on the vault
 
-## Direct-mode stand-in: mock_vault.py
+A target vault MUST accept `pause()` / `unpause()` only from the guardian address.
+Registration is curated by the guardian's registry owner, and the vault's own
+authorization check is the second half of that binding.
 
-A GenLayer Intelligent Contract used only to verify cross-contract invocation in
-direct-mode tests. It presents the same method names as the EVM interface.
+## Reference implementation: contracts/reference_vault.py
 
-File header (exact, required by constitution Principle II):
-`# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }`
+A GenLayer intelligent contract with the same surface:
 
-Storage: a single `bool` paused flag (inside the contract).
+- constructor `(guardian: Address)` - rejects the zero address (`ERR_ZERO_ADDRESS`)
+- `pause()` / `unpause()` - guardian only, else `ERR_NOT_GUARDIAN`; idempotent
+- `is_paused() -> bool`, `get_guardian() -> Address`
 
-### Write methods
-- `pause() -> None`: sets the internal paused flag to true. Idempotent: calling pause
-  when already paused leaves it true and dispatches no further effect.
-
-### View methods
-- `is_paused() -> bool`: returns the current paused flag.
-
-Behavior contract:
-- Starts unpaused (`is_paused() == false`).
-- After the guardian triggers on a MALICIOUS verdict, `is_paused() == true`.
-- A second trigger for the same incident does not change or re-fire the flag
-  (verifies FR-014 idempotency in direct mode).
-
-## Verification mapping
-
-| Requirement | How verified |
-|-------------|--------------|
-| FR-012 dispatch on malicious | Direct test: after MALICIOUS consensus, stand-in `is_paused()` is true |
-| FR-013 finalization + record | Review of emit-on-finalized dispatch; test asserts incident record present when PAUSED |
-| FR-014 no duplicate pause | Direct test: repeat trigger for same incident_hash leaves a single pause effect |
-| FR-015 no trigger when benign | Direct test: BENIGN/INCONCLUSIVE verdict leaves stand-in unpaused and vault ARMED |
+Verified by `tests/direct/test_stasis.py::test_reference_vault_only_guardian_may_pause`.

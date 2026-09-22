@@ -3,8 +3,9 @@
 //
 // Method names here are bound to the REAL deployed contract (contracts/stasis_guardian.py):
 //   reads:  get_total_deposited, get_locked_escrow, is_registered, get_state,
-//           get_vault_escrow, get_tier, get_bounty_amount
-//   writes: simulate_signal, submit_signal, deposit, withdraw
+//           get_vault_escrow, get_tier, get_bounty_amount, get_payout_status,
+//           get_last_drill_tier
+//   writes: simulate_signal (non-settling drill)
 // (There is no get_vault_state / get_telemetry / submit_incident - those names do
 // not exist on the contract.)
 
@@ -76,12 +77,13 @@ export interface VaultReadout {
   vaultEscrow: number | null;
   bounty: number | null;
   tier: number | null;
+  payoutStatus: number | null;
 }
 
-// genlayer-js logs failed gen_call reads to console.error before rejecting. The
-// StudioNet read-path outage is an expected, handled condition (callers fall back
-// to optimistic state), so we silence that one benign message for the duration of
-// our own guarded read to keep the console clean. Every other error passes through.
+// genlayer-js logs failed gen_call reads to console.error before rejecting. A
+// failed read is surfaced to the caller as an explicit "unavailable" state, so the
+// duplicate SDK log line is silenced for the duration of our own guarded read.
+// Every other error passes through.
 async function withQuietRpc<T>(fn: () => Promise<T>): Promise<T> {
   if (typeof console === "undefined") return fn();
   const original = console.error;
@@ -98,7 +100,7 @@ async function withQuietRpc<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 // Live read of protocol + target-vault metrics. Throws on RPC failure so callers
-// can surface an explicit error / optimistic state (do not swallow the throw).
+// surface an explicit "unavailable" state; nothing is ever substituted.
 export async function fetchReadout(target: string): Promise<VaultReadout> {
   return withQuietRpc(async () => {
     const client = createReadonlyClient();
@@ -110,6 +112,7 @@ export async function fetchReadout(target: string): Promise<VaultReadout> {
     let vaultEscrow: number | null = null;
     let bounty: number | null = null;
     let tier: number | null = null;
+    let payoutStatus: number | null = null;
 
     if (target) {
       registered = Boolean(await readRaw(client, "is_registered", [target]));
@@ -118,10 +121,11 @@ export async function fetchReadout(target: string): Promise<VaultReadout> {
         vaultEscrow = toNum(await readRaw(client, "get_vault_escrow", [target]));
         bounty = toNum(await readRaw(client, "get_bounty_amount", [target]));
         tier = toNum(await readRaw(client, "get_tier", [target]));
+        payoutStatus = toNum(await readRaw(client, "get_payout_status", [target]));
       }
     }
 
-    return { totalDeposited, lockedEscrow, registered, state, vaultEscrow, bounty, tier };
+    return { totalDeposited, lockedEscrow, registered, state, vaultEscrow, bounty, tier, payoutStatus };
   });
 }
 
@@ -182,7 +186,7 @@ export interface WriteResult {
   status: string;
   executionResult: string; // FINISHED_WITH_RETURN on a genuinely successful run
   ok: boolean;
-  tier: number;
+  tier: number | null; // null when the chain did not return a readable verdict
   tierLabel: string;
   fees: FeeAccounting;
 }
@@ -251,16 +255,35 @@ function feeAccounting(receipt: any): FeeAccounting {
   };
 }
 
-export interface IncidentPayload {
-  payloadA: string;
-  payloadB: string;
-  description: string;
-  expectedTier: number; // tier the chosen scenario deterministically yields
+export interface DrillPayload {
+  payloadA: string; // primary feed body (JSON object text)
+  payloadB: string; // secondary feed body (JSON object text)
 }
 
-// Best-effort extraction of the u32 verdict a finalized receipt returned. Falls
-// back to the tier the submitted scenario deterministically yields.
-function verdictFromReceipt(receipt: any, expectedTier: number): number {
+// A fresh, well-formed transaction hash (0x + 64 hex digits) for each drill.
+export function randomTxHash(): string {
+  const bytes = new Uint8Array(32);
+  globalThis.crypto.getRandomValues(bytes);
+  return "0x" + Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// The guardian only accepts evidence that names the target vault and the
+// reported transaction, so each scenario body is bound to both before sending.
+export function bindEvidence(body: string, target: string, txHash: string): string {
+  let fields: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(body);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) fields = parsed;
+    else fields = { data: parsed };
+  } catch {
+    fields = { data: body };
+  }
+  return JSON.stringify({ vault: target, tx_hash: txHash, ...fields });
+}
+
+// The u32 verdict a finalized receipt returned, or null when the receipt shape
+// carries none. Never substitutes an expected value.
+function verdictFromReceipt(receipt: any): number | null {
   const leader = receipt?.consensus_data?.leader_receipt?.[0];
   const candidates = [
     leader?.result?.raw,
@@ -272,26 +295,26 @@ function verdictFromReceipt(receipt: any, expectedTier: number): number {
     const n = typeof c === "bigint" ? Number(c) : typeof c === "number" ? c : NaN;
     if (Number.isFinite(n) && n >= 0 && n <= 3) return n;
   }
-  return expectedTier;
+  return null;
 }
 
-// Send a write and race-free-poll for the finalized receipt.
-export async function submitIncident(
+// Broadcast a non-settling drill: validators adjudicate the supplied bodies and
+// return a verdict, but the guardian never trips, pays, or burns a replay key.
+export async function runDrill(
   session: ReviewerSession,
   target: string,
-  payload: IncidentPayload,
+  payload: DrillPayload,
 ): Promise<WriteResult> {
-  const stamp = Date.now().toString(16);
+  if (!target) throw new Error("NEXT_PUBLIC_TARGET_VAULT_ADDRESS is not set");
+  const txHash = randomTxHash();
   const call: any = {
     address: requireAddress(),
     functionName: "simulate_signal",
     args: [
-      target || requireAddress(),
-      "0xsim-" + stamp,
-      "sim-" + stamp,
-      payload.payloadA,
-      payload.payloadB,
-      payload.description,
+      target,
+      txHash,
+      bindEvidence(payload.payloadA, target, txHash),
+      bindEvidence(payload.payloadB, target, txHash),
     ],
   };
 
@@ -306,7 +329,7 @@ export async function submitIncident(
   let status = "PENDING";
   let executionResult = "";
   let ok = false;
-  let tier: number = payload.expectedTier;
+  let tier: number | null = null;
   let fees: FeeAccounting = { deposit: 0, consumed: 0, refunded: 0, known: false };
   try {
     // Wait for finalization, not acceptance. In v0.6 the deprecated `status`
@@ -324,7 +347,20 @@ export async function submitIncident(
     executionResult = executionResultName(receipt);
     ok = succeeded(receipt, status);
     fees = feeAccounting(receipt);
-    tier = verdictFromReceipt(receipt, payload.expectedTier);
+    if (ok) {
+      tier = verdictFromReceipt(receipt);
+      if (tier === null) {
+        // The contract stores the last drill verdict; read it back as the source
+        // of truth when the receipt shape does not carry the return value.
+        try {
+          tier = toNum(
+            await withQuietRpc(() => readRaw(createReadonlyClient(), "get_last_drill_tier", [target])),
+          );
+        } catch {
+          tier = null;
+        }
+      }
+    }
   } catch (err) {
     console.warn("[stasis] receipt wait failed:", err);
     status = "RECEIPT_TIMEOUT";
@@ -336,7 +372,7 @@ export async function submitIncident(
     executionResult,
     ok,
     tier,
-    tierLabel: TIER_LABEL[tier] ?? "UNKNOWN",
+    tierLabel: tier === null ? "UNREADABLE" : TIER_LABEL[tier] ?? "UNKNOWN",
     fees,
   };
 }

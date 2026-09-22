@@ -7,36 +7,34 @@ real GenLayer environment (not the in-memory direct-mode VM).
 
 Deterministic consensus pipeline (runs on every invocation, no LLM required):
 
-- deploy + register + read-back of vault configuration
-- duplicate-registration rejection (consensus revert)
-- vault reconfiguration persistence
-- native GEN escrow accounting via payable `deposit()`
-- `deposit(0)` and empty `withdraw()` reverts
-- the anti-griefing bond floor (`set_min_bond`) rejecting an under-bonded report
-  before the feeds are read, and admitting one at the floor
-- the `recover()` guard rejecting an armed vault, so no unpause is emitted for a
-  vault that was never paused
-- deterministic adjudication guards (inactive / unregistered targets)
-- the full `run_nondet` block executing across all validators
+- deploy + curated registration + read-back of vault configuration
+- duplicate-registration and invalid-feed rejection
+- reconfiguration, admin handover and ownership re-assertion
+- native GEN escrow accounting via payable `deposit()`; `deposit(0)` and empty
+  `withdraw()` reverts
+- report preconditions failing closed: zero bond, malformed tx hash, unregistered
+  and inactive targets, and a bond below the `set_min_bond` floor
+- payout guards without a trip: `recover`, `claim_payout`, `dispute_trip` and
+  `resolve_dispute` all revert
+- a drill with unbound bodies reverting before consensus
+- **live feeds**: validators fetch both public explorers (Blockscout, Blockchair)
+  for a real mainnet transaction that does not touch the target, and the report
+  must revert as unbound with the bond untouched
+- the full `run_nondet` block executing across all validators through a drill, which
+  must never settle whatever the verdict
 
 LLM-dependent adjudication (gated behind `STASIS_INTEGRATION_LLM=1`):
 
-- `simulate_signal` producing a real `CRITICAL_BREACH` verdict, tripping the
-  breaker and crediting the pull-over-push bounty
-- the full lifecycle past the trip: `recover()` restoring the breaker and emitting
-  the unpause to the target vault
-- replay rejection after a real adjudication burns the incident key
+- a drill returning a real `CRITICAL_BREACH` verdict while vault state and escrow
+  stay untouched
+- a live, bound report on the real recipient of that mainnet transaction being
+  adjudicated (not tripped), burning the replay key, and rejecting a replay
 
-Every write entry point the contract exposes is exercised by one of the two
-groups, so none of them goes unmeasured in the fee profile. The `recover()` and
-`set_min_bond` *happy* paths both need a real trip, which needs a verdict from a
-provider, so a keyless run only reaches their guard branches - but that costs
-nothing here: measured across all eight entry points, `executionBudgetPerRound`
-spans 98.286T to 98.740T wei, a 0.46% spread, because the budget is dominated by a
-fixed per-transaction execution floor rather than by the branch taken. The profile
-is also written with a 1.25 headroom multiplier on top. Re-run under
-`STASIS_INTEGRATION_LLM=1` when a provider is available to measure the real
-branches, but no write is at risk of under-funding in the meantime.
+The trip -> challenge window -> dispute -> recover lifecycle needs a live report
+whose public evidence shows an exploit of the registered target, which no public
+feed can be made to produce on demand. That lifecycle is covered exhaustively in
+the direct suite (`tests/direct/`), including both dispute outcomes, the deadline
+fallback and the solvency invariant after every step.
 
 ## How to run
 
@@ -109,32 +107,25 @@ Two things about this are specific to Studio Devnet:
 ## Deploying to Studio Devnet
 
 ```bash
-STASIS_DEPLOY=1 gltest tests/integration/test_deploy_studio_dev.py -v -s \
-    --network studio_devnet
+STASIS_DEPLOY=1 STASIS_DEPLOYER_KEY_FILE=<path to owner key> NO_PROXY="*" \
+    gltest tests/integration/test_deploy_studio_dev.py -v -s --network studio_devnet
 ```
 
-Deploys guardian + mock vault, registers the vault, writes
+Deploys guardian + reference vault (bound to the guardian), registers the vault, writes
 `deployments/studio-dev.json`, and prints the addresses for `apps/web/.env.local`.
-It is a pytest module because gltest only populates its network registry from the
+The deployer becomes the registry owner and the reference vault's admin, so the
+step refuses to run without a key file that is kept (gltest's default account is a
+fresh random key per run). It is a pytest module because gltest only populates its network registry from the
 CLI at startup, so a standalone script cannot resolve a network name.
 
-## Environment notes (observed 2026-09-05)
+## Environment notes
 
-The guardian deploys and accepts writes on real GenVM (verified via the
-`genlayer` CLI: both contracts finalized on StudioNet with 5/5 validators AGREE).
-Three integration back-ends were exercised in the build sandbox; each had an
-environment-level blocker unrelated to the contract or these tests:
-
-- **GLSim** (`glsim`) - its lightweight, non-GenVM Python runner rejects the
-  guardian's storage model (`class is not marked for usage within storage`),
-  though the identical contract deploys on real GenVM. GLSim is unsuitable for
-  this contract; use Local Studio or StudioNet.
-- **Hosted StudioNet** - deploys and writes succeed, but `gen_call` reads were
-  returning `Contract ... not found` for finalized contracts (a hosted read-path
-  outage), which fails the read-back assertions.
-- **Local Studio** - requires a running Docker engine; the sandbox's Docker
-  Desktop engine socket did not come up.
-
-Run against a healthy Local Studio (or a StudioNet with a working read path) to
-see the suite green. The deterministic subset needs no LLM; the adjudication
-subset needs a validator LLM provider and `STASIS_INTEGRATION_LLM=1`.
+- **Studio Devnet** (`studio_devnet`, chain 61997) is the Consensus v0.6 preview this
+  suite is validated against. It charges fees and may be reset.
+- **GLSim** (`glsim`) uses a lightweight non-GenVM runner that rejects the guardian's
+  storage model (`class is not marked for usage within storage`); use Local Studio
+  or Studio Devnet instead.
+- **Local Studio** (`genlayer up`) needs a running Docker engine.
+- The live-feed test depends on `eth.blockscout.com` and `api.blockchair.com` being
+  reachable from the validators. Either being rate-limited makes validators degrade
+  to a retryable revert, which the test still reads as a (correct) rejection.
