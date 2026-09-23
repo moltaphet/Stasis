@@ -9,7 +9,7 @@ Public interface of `contracts/stasis_guardian.py`. Every rejection reverts with
 | Method | Access | Effect |
 |---|---|---|
 | `register_vault(target, primary_feed_url, secondary_feed_url, threshold_bps, bounty_amount, cooldown_seconds, active)` | owner | Validates feeds (https, no credentials, distinct) and `1 <= threshold_bps <= 10000`; stores the vault `ARMED` with the caller as admin |
-| `configure_vault(target, threshold_bps, bounty_amount, cooldown_seconds, active)` | admin | Updates parameters |
+| `configure_vault(target, threshold_bps, bounty_amount, cooldown_seconds, active)` | admin | Updates parameters. The cooldown is frozen while the vault is `TRIPPED` or a payout is `PENDING`/`DISPUTED` (`ERR_PENDING_ACTION_LOCKS_COOLDOWN`); other parameters stay adjustable |
 | `set_min_bond(target, min_bond)` | admin | Raises the reporter bond floor |
 | `transfer_vault_admin(target, new_admin)` | admin | Blocked while a dispute is open |
 | `transfer_ownership(new_owner)` | owner | |
@@ -25,7 +25,8 @@ Public interface of `contracts/stasis_guardian.py`. Every rejection reverts with
 
 Settlement by tier:
 - `CRITICAL_BREACH`: `TRIPPED`, `pause()` emitted, bounty (capped by escrow) and bond
-  locked as a `PENDING` payout until `trip_ts + cooldown_seconds`.
+  locked as a `PENDING` payout until `unlock_ts = trip_ts + cooldown_seconds`, stamped
+  at trip time and immutable for that trip.
 - `MALICIOUS_REPORT`: bond slashed into the vault reserve.
 - `ELEVATED_RISK`: `RATE_LIMITED`; bond refunded.
 - `NORMAL`: `RATE_LIMITED` clears to `ARMED`; bond refunded.
@@ -37,7 +38,7 @@ Settlement by tier:
 | `claim_payout(target) -> u256` | anyone | After the window, releases bounty + bond to the reporter; `ERR_PAYOUT_LOCKED` while pending or disputed |
 | `dispute_trip(target)` payable | admin | Inside the window, `value >= bounty + bond`; payout becomes `DISPUTED` |
 | `resolve_dispute(target) -> bool` | anyone | Fresh validator round over the recorded tx. Upheld: reporter receives bounty + bond + dispute bond. Overturned: bounty back to reserve, reporter bond + dispute bond to admin, vault `RESTORED` and `unpause()` emitted. After 7 days unresolved, the original verdict stands |
-| `recover(target)` | admin | `TRIPPED` only, after cooldown, not while disputed; releases an undisputed bounty; `RESTORED` and `unpause()` emitted |
+| `recover(target)` | admin | `TRIPPED` only, at or after the stamped `unlock_ts` (never the live cooldown), not while disputed; releases an undisputed bounty; `RESTORED` and `unpause()` emitted |
 
 ## Views
 

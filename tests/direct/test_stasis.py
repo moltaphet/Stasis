@@ -10,7 +10,7 @@ Coverage maps to the audit pillars:
        revert with explicit ERR_ codes and change nothing.
 
 Direct mode runs the leader function; validator agreement is exercised explicitly
-via direct_vm.run_validator. External EVM messages (.emit().pause()/unpause() and
+via direct_vm.run_validator. Emitted messages (the GenVM pause()/unpause() calls and
 native emit_transfer) are no-ops in-process, so these tests assert the guardian's
 deterministic, consensus-driven effects (tier, state, incident record, accounting).
 """

@@ -220,7 +220,8 @@ Every rejection reverts with a classified, stable code, e.g.
 `ERR_FEED_UNAVAILABLE`, `ERR_FEED_REJECTED`, `ERR_ADJUDICATION_FAILED`,
 `ERR_NOTHING_TO_WITHDRAW`, `ERR_NO_PAYOUT`, `ERR_PAYOUT_LOCKED`,
 `ERR_DISPUTE_WINDOW_CLOSED`, `ERR_DISPUTE_BOND_TOO_LOW`, `ERR_NOT_DISPUTED`,
-`ERR_NOT_TRIPPED`, `ERR_COOLDOWN_ACTIVE`, `ERR_NO_DRILL`.
+`ERR_NOT_TRIPPED`, `ERR_COOLDOWN_ACTIVE`, `ERR_PENDING_ACTION_LOCKS_COOLDOWN`,
+`ERR_NO_DRILL`.
 
 ---
 
@@ -270,6 +271,11 @@ bucket, never on raw model text.
 - **No instant payouts.** A confirmed breach locks bounty and bond for the challenge
   window. They cannot be claimed or withdrawn while pending or disputed
   (`ERR_PAYOUT_LOCKED`), and a new report cannot overwrite an unsettled bounty.
+- **Fixed challenge window.** The unlock time is stamped at trip time, and
+  `recover`, `claim_payout` and `dispute_trip` all gate on that stamp. The admin
+  cannot change the cooldown while a trip or bounty is in flight
+  (`ERR_PENDING_ACTION_LOCKS_COOLDOWN`), so the window cannot be shortened after
+  the fact.
 - **Bonded disputes.** Only the vault admin can dispute, only inside the window, and
   only by posting at least the reporter's full stake (`ERR_DISPUTE_BOND_TOO_LOW`).
   The loser forfeits their bond to the winner. If validators cannot resolve a dispute
@@ -421,8 +427,8 @@ deploy step refuses to run without a key file that is kept.
 | Chain ID                | `61997`                                        |
 | RPC endpoint            | `https://studio-dev.genlayer.com/api`          |
 | Explorer                | `https://explorer-studio-dev.genlayer.com`     |
-| Stasis Guardian         | `0xC044B8cD496f88903f14e7B330cF3E35a1a8dD56`   |
-| Reference target vault  | `0x669379b85679874e00Aff56258109e3076B9E77F`   |
+| Stasis Guardian         | `0x12c7ecA1531aC35F3fA1c2153E90Dae8E8e1D959`   |
+| Reference target vault  | `0x73a1d62F1eE6C47d84bB0C577d21846582534918`   |
 | Registry owner          | `0x0f4F188E5815562b14AF3Af87f6EbA2f9B68E981`   |
 
 Studio Devnet charges fees: writes must carry a fee distribution (see the fee profile

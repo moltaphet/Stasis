@@ -6,8 +6,8 @@
   "consensus": "v0.6 (Studio v0.123 RC) preview",
   "deployer": "0x0f4F188E5815562b14AF3Af87f6EbA2f9B68E981",
   "registryOwner": "0x0f4F188E5815562b14AF3Af87f6EbA2f9B68E981",
-  "guardian": "0xC044B8cD496f88903f14e7B330cF3E35a1a8dD56",
-  "targetVault": "0x669379b85679874e00Aff56258109e3076B9E77F",
+  "guardian": "0x12c7ecA1531aC35F3fA1c2153E90Dae8E8e1D959",
+  "targetVault": "0x73a1d62F1eE6C47d84bB0C577d21846582534918",
   "targetVaultRegistered": true,
   "primaryFeed": "https://eth.blockscout.com/api/v2/transactions/{tx_hash}",
   "secondaryFeed": "https://api.blockchair.com/ethereum/dashboards/transaction/{tx_hash}"

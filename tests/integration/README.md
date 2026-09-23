@@ -30,9 +30,19 @@ LLM-dependent adjudication (gated behind `STASIS_INTEGRATION_LLM=1`):
 - a live, bound report on the real recipient of that mainnet transaction being
   adjudicated (not tripped), burning the replay key, and rejecting a replay
 
-The trip -> challenge window -> dispute -> recover lifecycle needs a live report
-whose public evidence shows an exploit of the registered target, which no public
-feed can be made to produce on demand. That lifecycle is covered exhaustively in
+Guardian -> reference vault (`test_vault_guardian_integration.py`):
+
+- deploys the reference vault bound to the guardian, registers it, and checks that
+  a pause from any other account reverts (deterministic)
+- with `STASIS_INTEGRATION_LLM=1`: a bonded live report reaching `CRITICAL_BREACH`
+  trips the guardian, the emitted `pause()` reaches the vault and `is_paused` flips
+  from `False` to `True`, and neither `recover` nor a cooldown change is accepted
+  inside the stamped challenge window. No public explorer shows an exploit of a
+  freshly deployed vault, so its two feeds are independent echo services (Postman
+  Echo, httpbin) that reflect the target, tx hash and incident telemetry from the
+  URL; validators still fetch them live and run the real LLM adjudication.
+
+The rest of the trip -> challenge window -> dispute -> recover lifecycle is covered exhaustively in
 the direct suite (`tests/direct/`), including both dispute outcomes, the deadline
 fallback and the solvency invariant after every step.
 

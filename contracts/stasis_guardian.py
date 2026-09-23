@@ -107,13 +107,21 @@ def _as_address(value) -> Address:
     return value if isinstance(value, Address) else Address(value)
 
 
-# --- EVM target interfaces (Pillar 2 / circuit-breaker hook) ------------------
+# --- Target vault interface (Pillar 2 / circuit-breaker hook) ----------------
+#
+# Registered targets are GenVM contracts exposing the reference vault's pause
+# surface (contracts/reference_vault.py): pause(), unpause(), is_paused(). The
+# calls are GenVM internal messages addressed by method name, so they must not be
+# declared through gl.evm.contract_interface: that would emit an ABI-encoded EVM
+# call (keccak selector) that a GenVM vault never receives. Messages are emitted on
+# finalization, so a verdict overturned before finality never pauses anything, and
+# the vault accepts them only because the sender is the guardian it was bound to.
 
 
-@gl.evm.contract_interface
+@gl.contract.interface
 class ITargetVault:
     class View:
-        pass
+        def is_paused(self) -> bool: ...
 
     class Write:
         def pause(self) -> None: ...
@@ -507,6 +515,15 @@ class StasisGuardian(gl.contract.Contract):
         target_address = _as_address(target_address)
         vault = self._require_admin(target_address)
         _validate_threshold(int(threshold_bps))
+        if int(cooldown_seconds) != int(vault.cooldown_seconds) and self._cooldown_locked(vault):
+            # The cooldown is the challenge window of any trip in flight. Changing
+            # it mid-flight would let the admin reshape a window the reporter and
+            # disputers already rely on, so it is frozen until the trip and its
+            # bounty are fully settled. Other parameters stay adjustable.
+            _fail(
+                "ERR_PENDING_ACTION_LOCKS_COOLDOWN",
+                "cannot alter cooldown while trip or payout is pending",
+            )
         vault.threshold_bps = threshold_bps
         vault.bounty_amount = bounty_amount
         vault.cooldown_seconds = cooldown_seconds
@@ -636,7 +653,7 @@ class StasisGuardian(gl.contract.Contract):
             vault.payout_status = PAYOUT_OVERTURNED
             if vault.state == STATE_TRIPPED:
                 vault.state = STATE_RESTORED
-                ITargetVault(target_address).emit().unpause()
+                ITargetVault(target_address).emit(on="finalized").unpause()
         return upheld
 
     # --- Recovery (Pillar 2 lifecycle) ---------------------------------------
@@ -650,9 +667,12 @@ class StasisGuardian(gl.contract.Contract):
         if vault.payout_status == PAYOUT_DISPUTED:
             _fail("ERR_PAYOUT_LOCKED", "resolve the open dispute before recovering")
 
-        ready_at = int(vault.trip_ts) + int(vault.cooldown_seconds)
+        # Honor the unlock time stamped at trip time, never the live cooldown
+        # setting: the challenge window is fixed when the trip is recorded, so no
+        # later configuration can release the bounty or lift the pause early.
+        ready_at = int(vault.payout_unlock_ts)
         if self._now_unix() < ready_at:
-            _fail("ERR_COOLDOWN_ACTIVE", "cooldown has not elapsed")
+            _fail("ERR_COOLDOWN_ACTIVE", "challenge window has not elapsed")
 
         # The challenge window ends with the cooldown, so an undisputed bounty is
         # released now; the next trip starts from a clean payout slot.
@@ -661,7 +681,7 @@ class StasisGuardian(gl.contract.Contract):
 
         vault.state = STATE_RESTORED
         # Complete the lifecycle: lift the pause on the target vault on finalization.
-        ITargetVault(target_address).emit().unpause()
+        ITargetVault(target_address).emit(on="finalized").unpause()
 
     # --- Adjudication entry points (Pillar 1/3) ------------------------------
 
@@ -841,6 +861,14 @@ class StasisGuardian(gl.contract.Contract):
         if target_address not in self.vaults:
             _fail("ERR_VAULT_NOT_REGISTERED", "vault is not registered")
         return self.vaults[target_address]
+
+    def _cooldown_locked(self, vault: Vault) -> bool:
+        # A trip or bounty is in flight: its challenge window must not move.
+        return (
+            vault.state == STATE_TRIPPED
+            or vault.payout_status == PAYOUT_PENDING
+            or vault.payout_status == PAYOUT_DISPUTED
+        )
 
     def _require_admin(self, target_address: Address) -> Vault:
         vault = self._require_vault(target_address)
@@ -1044,10 +1072,12 @@ class StasisGuardian(gl.contract.Contract):
             vault.payout_reporter = reporter
             vault.payout_bounty = u256(payout)
             vault.payout_bond = u256(bond)
+            # Immutable for this trip: claim_payout, dispute_trip and recover all
+            # gate on this stamp, never on the live cooldown setting.
             vault.payout_unlock_ts = u256(now_unix + int(vault.cooldown_seconds))
             vault.dispute_bond = u256(0)
             vault.dispute_deadline_ts = u256(0)
-            ITargetVault(target_address).emit().pause()
+            ITargetVault(target_address).emit(on="finalized").pause()
         elif tier == TIER_MALICIOUS_REPORT:
             # Slash the bond into the vault reserve; it never becomes claimable.
             vault.escrow_balance = u256(int(vault.escrow_balance) + bond)
